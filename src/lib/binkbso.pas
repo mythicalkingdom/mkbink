@@ -77,6 +77,12 @@ type
       const A : TFTNAddress;
       IncludeHold : Boolean) : Integer;
 
+    { Like Pending, and the size of the files in Bytes. }
+    function PendingInfo(
+      const A : TFTNAddress;
+      IncludeHold : Boolean;
+      out Bytes : Int64) : Integer;
+
     { Queues FileName for A: appends it to the flow file of the given
       flavour (I, C, D, N or H).  Returns the flow file's path. }
     function Attach(
@@ -364,6 +370,38 @@ begin
   Tmp := TBinkOutbound.Create;
   try
     Result := Collect(A, IncludeHold, Tmp);
+  finally
+    Tmp.Free;
+  end;
+end;
+
+function TBinkBso.PendingInfo(
+  const A : TFTNAddress;
+  IncludeHold : Boolean;
+  out Bytes : Int64) : Integer;
+var
+  Tmp : TBinkOutbound;
+  I   : Integer;
+  Sz  : Int64;
+  SR  : TSearchRec;
+begin
+  Bytes := 0;
+  Tmp := TBinkOutbound.Create;
+  try
+    Result := Collect(A, IncludeHold, Tmp);
+
+    for I := 0 to Tmp.Count - 1 do
+    begin
+      Sz := 0;
+
+      if FindFirst(Tmp.Items[I].LocalPath, faAnyFile, SR) = 0 then
+      begin
+        Sz := SR.Size;
+        FindClose(SR);
+      end;
+
+      Inc(Bytes, Sz);
+    end;
   finally
     Tmp.Free;
   end;

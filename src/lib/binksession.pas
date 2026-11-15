@@ -39,6 +39,34 @@ type
 
   TBinkLogEvent = procedure(const Msg : String) of object;
 
+  { What a session is doing, for displays: copied out of the session by
+    the session's own thread (OnProgress), so it is always consistent. }
+  TBinkProgress = record
+    State         : TBinkState;
+    Originating   : Boolean;
+    Remote        : String;       { the remote's addresses }
+    SysName       : String;       { as the remote told us (M_NUL) }
+    Sysop         : String;
+    Location      : String;
+    Version       : String;
+    Secure        : Boolean;
+    Plz           : Boolean;
+    Nr            : Boolean;
+    BytesSent     : Int64;
+    BytesReceived : Int64;
+    FilesSent     : Integer;
+    FilesReceived : Integer;
+    TxName        : String;       { file being sent, '' = none }
+    TxPos         : Int64;
+    TxSize        : Int64;
+    RxName        : String;       { file being received }
+    RxPos         : Int64;
+    RxSize        : Int64;
+  end;
+
+  TBinkProgressEvent = procedure(Sender : TObject;
+    const P : TBinkProgress) of object;
+
   { Answering side: decide whether a presented address is known and
     return the password expected for it ('' = no password). }
   TBinkAuthEvent = function(
@@ -81,6 +109,9 @@ type
     FOnLog           : TBinkLogEvent;
     FOnAuth          : TBinkAuthEvent;
     FOnAuthenticated : TNotifyEvent;
+    FOnProgress      : TBinkProgressEvent;
+    FLastPub         : QWord;
+    FRemSys, FRemSysop, FRemLoc, FRemVer : String;
 
     { transmit side }
     FOutItems  : TFPList;           { TBinkOutItem refs, in sending order }
@@ -112,6 +143,7 @@ type
 
     procedure Log(const Msg : String);
     procedure Touch;
+    procedure Publish(Force : Boolean);
     procedure Fail(const Msg : String);
     procedure FailRemote(const What, Msg : String);
     procedure AbortSession(const Msg : String);
@@ -207,6 +239,10 @@ type
 
     property OnLog : TBinkLogEvent
       read FOnLog write FOnLog;
+
+    { Called from the session's thread, now and then, with what it is doing. }
+    property OnProgress : TBinkProgressEvent
+      read FOnProgress write FOnProgress;
 
     { Answering side only. Without a handler, every address is
       accepted and Config.Password is the password. }
@@ -333,6 +369,53 @@ end;
 procedure TBinkSession.Touch;
 begin
   FLastActivity := GetTickCount64;
+end;
+
+procedure TBinkSession.Publish(Force : Boolean);
+var
+  P : TBinkProgress;
+  T : QWord;
+begin
+  if not Assigned(FOnProgress) then
+    Exit;
+
+  T := GetTickCount64;
+
+  if (not Force) and (T - FLastPub < 100) then
+    Exit;
+
+  FLastPub := T;
+  P := Default(TBinkProgress);
+  P.State := FState;
+  P.Originating := FOriginating;
+  P.Remote := FRemoteStr;
+  P.SysName := FRemSys;
+  P.Sysop := FRemSysop;
+  P.Location := FRemLoc;
+  P.Version := FRemVer;
+  P.Secure := FSecure;
+  P.Plz := FPlz;
+  P.Nr := FRemoteNR;
+  P.BytesSent := FBytesSent;
+  P.BytesReceived := FBytesReceived;
+  P.FilesSent := FFilesSent;
+  P.FilesReceived := FFilesReceived;
+
+  if FCurrent <> nil then
+  begin
+    P.TxName := FCurrent.FileName;
+    P.TxPos := FCurrent.Position;
+    P.TxSize := FCurrent.FileSize;
+  end;
+
+  if FRecv <> nil then
+  begin
+    P.RxName := FRecv.FileName;
+    P.RxPos := FRecv.Position;
+    P.RxSize := FRecv.FileSize;
+  end;
+
+  FOnProgress(Self, P);
 end;
 
 procedure TBinkSession.Cancel;
@@ -469,6 +552,15 @@ var
 begin
   S := FrameDataAsString(F);
   Log('Remote: ' + S);
+
+  if Copy(S, 1, 4) = 'SYS ' then
+    FRemSys := Copy(S, 5, MaxInt)
+  else if Copy(S, 1, 4) = 'ZYZ ' then
+    FRemSysop := Copy(S, 5, MaxInt)
+  else if Copy(S, 1, 4) = 'LOC ' then
+    FRemLoc := Copy(S, 5, MaxInt)
+  else if Copy(S, 1, 4) = 'VER ' then
+    FRemVer := Copy(S, 5, MaxInt);
 
   if Copy(S, 1, 4) = 'OPT ' then
   begin
@@ -659,12 +751,16 @@ var
   I : Integer;
   Pwd, Expected : String;
   Known : Boolean;
+  KnownCount : Integer;
 begin
   if Length(FRemote) = 0 then
     AbortSession('Bad address: no valid address in M_ADR');
 
   Expected := '';
+  KnownCount := 0;
 
+  { An address we do not know is only left out (a system presents all its
+    AKAs); the session is refused when none of them is known. }
   for I := 0 to High(FRemote) do
   begin
     Pwd := FConfig.Password;
@@ -675,15 +771,26 @@ begin
 
     if not Known then
     begin
-      Log('Rejected unknown address ' + AddressToString(FRemote[I]));
-      AbortSession('Bad address');
+      Log('Ignoring unknown address ' + AddressToString(FRemote[I]));
+      Continue;
     end;
 
-    if I = 0 then
+    if KnownCount = 0 then
       Expected := Pwd
     else if Pwd <> Expected then
       AbortSession('Inconsistent password settings');
+
+    FRemote[KnownCount] := FRemote[I];
+    Inc(KnownCount);
   end;
+
+  if KnownCount = 0 then
+  begin
+    Log('Rejected unknown address ' + AddressToString(FRemote[0]));
+    AbortSession('Bad address');
+  end;
+
+  SetLength(FRemote, KnownCount);
 
   if Expected <> '' then
   begin
@@ -774,7 +881,9 @@ begin
   FFilesSent := 0;     FFilesReceived := 0;
   FBytesSent := 0;     FBytesReceived := 0;
   SetLength(FRemote, 0);
+  FRemSys := ''; FRemSysop := ''; FRemLoc := ''; FRemVer := '';
   Touch;
+  Publish(True);
 
   try
     try
@@ -1024,6 +1133,7 @@ begin
 
   Touch;
   PrevOut := 0;
+  Publish(True);
 
   while True do
   begin
@@ -1058,6 +1168,8 @@ begin
       ProcessQueue;
       Inc(N);
     end;
+
+    Publish(False);
 
     if TransferComplete then
     begin

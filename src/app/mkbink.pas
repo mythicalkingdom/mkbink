@@ -31,6 +31,7 @@ type
   TOptions = record
     Mode      : String;
     LinksFile : String;      { run / check: the settings file }
+    ControlSock : String;    { run: Unix socket for a monitor }
     Target    : String;      { poll: host[:port] }
     Config    : TBinkConfig;
     Remote    : String;      { poll: expected address; listen: ';' list }
@@ -113,7 +114,9 @@ begin
   Writeln('  mkbink poll <host[:port]> -a <our addr> [-r <remote addr>] [options]');
   Writeln('  mkbink listen -a <our addr> [options]');
   Writeln('  mkbink queue -O <bso dir> -t <addr> [-F flavour] [-x] <file>...');
-  Writeln('  mkbink run -f <settings file>      answer calls and call the links in the file');
+  Writeln('  mkbink run -f <settings file> [-S <socket>]');
+  Writeln('                                     answer calls and call the links in the file;');
+  Writeln('                                     -S: a Unix socket a monitor can connect to (see src/lib/binkcontrol.pas)');
   Writeln('  mkbink check -f <settings file>    check the settings file and show what it says');
   Writeln;
   Writeln('Options:');
@@ -198,6 +201,7 @@ begin
   O.Password := GetEnvironmentVariable('BINK_PASSWORD');
   O.Mode := '';
   O.LinksFile := '';
+  O.ControlSock := '';
   O.Target := '';
   O.Remote := '';
   O.BindAddr := '';
@@ -248,6 +252,11 @@ begin
     begin
       Inc(I);
       O.LinksFile := NeedArg(I, A);
+    end
+    else if A = '-S' then
+    begin
+      Inc(I);
+      O.ControlSock := NeedArg(I, A);
     end
     else if A = '-r' then
     begin
@@ -653,6 +662,7 @@ var
 begin
   Lg := TLog.Create;
   GMailer := TBinkMailer.Create(O.LinksFile, @Lg.Print);
+  GMailer.ControlPath := O.ControlSock;
   try
     {$IFDEF UNIX}
     fpSignal(SIGINT,  @HandleRunSignal);

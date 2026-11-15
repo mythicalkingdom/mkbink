@@ -147,10 +147,12 @@ begin
       if Assigned(FOwner.FOnSession) then
         FOwner.FOnSession(FOwner, Sess);
 
-      Sess.Answer(FSock);
-
-      if Assigned(FOwner.FOnSessionDone) then
-        FOwner.FOnSessionDone(FOwner, Sess);
+      try
+        Sess.Answer(FSock);
+      finally
+        if Assigned(FOwner.FOnSessionDone) then
+          FOwner.FOnSessionDone(FOwner, Sess);
+      end;
     finally
       FOwner.Unregister(Sess);
     end;

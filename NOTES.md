@@ -37,17 +37,20 @@ Separate process, supervised by mklisten (`"mailer"` port type in mklisten.json)
 1. **mkbink reads a links file; `run`/`check` modes** - DONE (this repo).
 2. **DONE** (mk-fpc repo): mailer settings in `Mailer.Mk` (new file, record `MailerCfgType` in `src/MKGlobT.pas`, 64 links, 1 KB expansion, reserved file-request fields), `mkconfig` pages EchoMail > Mailer / Mailer Links (`src/CfgMail.pas`), `mkbinkcfg` writes the links file (mode 0600, replaced all at once, untouched when nothing changed, exit 3 = mailer not enabled).  Own address(es), name, sysop, location come from Config.Mk; inbound and BSO directories are the EchoMail Options (EchoCfg.Mk), relative ones from the BBS directory.  The links file is the contract: mkbinkcfg must keep writing `version 1` until this repo's `BINK_LINKS_VERSION` changes.
 3. **DONE** (mk-fpc repo): mklisten has a top-level `"mailer"` section (`config` = BBS config dir; optional `mkbink`, `mkbinkcfg`, `settings`, `logfile`, `interval`, `restart`).  It runs `mkbinkcfg -q -o <settings>` at the start, on SIGHUP and whenever Config.Mk / EchoCfg.Mk / Mailer.Mk changed (checked every `interval` s); exit 0 = mailer wanted, 3 = switched off (mkbink stopped), 1 = error (mkbink keeps running).  It starts `mkbink run -f <settings>` (prctl PDEATHSIG: dies with mklisten), sends it SIGHUP when the settings file changed, restarts it when it dies (delay `restart` s, doubled while it dies within 60 s, max 300) and stops it (SIGTERM, then SIGKILL after 15 s) when mklisten stops.  `make install` builds/installs mkbink from ../mkbink (MKBINK=...); the systemd unit has ExecReload (SIGHUP).  This repo's side needs nothing: mkbink only has to keep honouring SIGTERM (clean stop) and SIGHUP (reload).
-4. mkbink control socket (localhost, Unix) with structured events + commands (poll now, hold/release, rescan, reload);
-   mkmon "Mailer" screen in the style of the old Frontdoor status screen.
+4. **DONE**: `mkbink run -S <socket>` makes a Unix socket (mode 600; mklisten passes `<rundir>/mailer.sock`) that a monitor connects to.
+   Text lines: HELLO, the last 200 LOG lines, then STATE ... END frames (ME, STAT, LINK, SESS lines, tab separated; layout in the
+   comment above `BuildState` in `src/lib/binkmailer.pas`) every 250 ms during a session, otherwise on a change and every 5 s;
+   LOG lines as they happen.  Commands (answered by one ACK/ERR line): POLL <addr>|*, HOLD, FREE, RESCAN, RELOAD, ABORT <id>, PING
+   (`src/lib/binkcontrol.pas`).  The session publishes its progress (`OnProgress`, `TBinkProgress`: remote names from M_NUL, bytes, files,
+   file being sent / received with position) from its own thread.  mkmon (mk-fpc, `src/MKMonMail.pas`, key M in the node list) shows it in
+   the style of the FrontDoor status screen.  `tests/controltest.py [--big MB]` tests the socket with two mailers.
 5. Inbound hook (`--on-inbound`, a tosser plugs in here), secure / unsecure inbound split.
 6. Nodelist lookup for links without a host (done in mkbinkcfg, so mkbink never touches the nodelist).
 Later: tosser, netmail, file requests (config gives a "file request user" a level + flags like a caller's file access).
 
 ## Known gaps / edges
 
-* `Authenticate` refuses the whole session if ANY address the remote presents is unknown to us.  A real mailer (binkd)
-  presents all its AKAs, so a link block per AKA, or `accept-unknown`, is needed until this is relaxed to "at least one
-  known".
+* (fixed in phase 4) A remote that presents several addresses is accepted when at least one is known; the others are ignored.
 * A local `.bsy` lock held by an answering session makes a call to that link fail (counted as a failure, backoff).
 * Two callers receiving a file with identical name+size+time at once would share one `.part` file.
 * No IPv6, no file requests (.req), no binkd GZ/CRYPT/ND/NDA/MB/EXTCMD.

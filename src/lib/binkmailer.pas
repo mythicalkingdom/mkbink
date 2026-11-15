@@ -28,7 +28,8 @@ uses
   BinkSession,
   BinkListener,
   BinkInbound,
-  BinkBso;
+  BinkBso,
+  BinkControl;
 
 type
   { what the mailer knows about one link while it runs }
@@ -41,8 +42,24 @@ type
     NextAttempt : Int64;         { seconds (NowSec), not before }
     LastPoll    : Int64;         { when the last call ended, -1 = never }
     Waiting     : Boolean;       { mail was waiting at the last look }
+    PendCount   : Integer;       { ... how many items, and their size }
+    PendBytes   : Int64;
+    Held        : Boolean;       { not called until released (control socket) }
+    Force       : Boolean;       { call at once (control socket) }
     LastResult  : String;
   end;
+
+  { a session that is going on, for the control socket }
+  TSessEntry = class
+  public
+    Id          : Integer;
+    Sess        : TBinkSession;
+    Originating : Boolean;
+    Start       : Int64;         { unix time }
+    P           : TBinkProgress;
+  end;
+
+  TSessionEnded = procedure(Session : TBinkSession) of object;
 
   TPollThread = class(TThread)
   private
@@ -52,14 +69,16 @@ type
     FState   : TLinkState;
     FOk      : Boolean;
     FError   : String;
+    FOnEnded : TSessionEnded;
   protected
     procedure Execute; override;
   public
     constructor Create(AState : TLinkState; const ACfg : TBinkConfig;
       const ANode : TBinkNodeInfo; const AInboundPath : String;
-      ABso : TBinkBso; ALog : TBinkLogEvent);
+      ABso : TBinkBso; ALog : TBinkLogEvent; AOnEnded : TSessionEnded);
     destructor Destroy; override;
     procedure Cancel;
+    property Session : TBinkSession read FSession;
     property State : TLinkState read FState;
     property Ok : Boolean read FOk;
     property Error : String read FError;
@@ -94,7 +113,32 @@ type
     FFatal     : Boolean;
     FStartKey  : String;
 
+    { control socket }
+    FControlPath : String;
+    FControl     : TBinkControl;
+    FSessLock    : TRTLCriticalSection;
+    FSess        : TFPList;           { TSessEntry }
+    FNextId      : Integer;
+    FStarted     : Int64;             { unix time }
+    FCalls, FCallsOk, FCallsFailed, FInSessions : Integer;
+    FTotSent, FTotRecv : Int64;
+    FTotFilesSent, FTotFilesRecv : Integer;
+    FRing        : TStringList;       { the last log lines, for new clients }
+    FPendLog     : String;            { not yet sent to the clients }
+    FDirty       : Boolean;
+    FLastState   : QWord;
+
     procedure Log(const Msg : String);
+    procedure EmitLog(const Msg : String);
+    procedure SessAdd(S : TBinkSession; Orig : Boolean);
+    procedure SessProgress(Sender : TObject; const P : TBinkProgress);
+    procedure SessRemove(S : TBinkSession);
+    procedure InboundDone(Sender : TObject; Session : TBinkSession);
+    function  BuildState : String;
+    function  Hello : String;
+    function  HandleCommand(const Cmd : String) : String;
+    procedure ControlTick;
+    function  FindLinkState(const Key : String) : TLinkState;
     function  State(Link : TBinkLink) : TLinkState;
     function  LoadSetup(const Path : String; out S : TBinkSetup) : Boolean;
     function  RestartKey(S : TBinkSetup) : String;
@@ -102,6 +146,7 @@ type
     procedure Describe;
     procedure CheckFileMode;
     procedure Schedule;
+    procedure ProbeLink(St : TLinkState);
     procedure StartPoll(Link : TBinkLink; St : TLinkState;
       const Why : String);
     procedure ReapPolls(All : Boolean);
@@ -114,6 +159,9 @@ type
     constructor Create(const ASetupFile : String; ALog : TBinkLogEvent);
     destructor Destroy; override;
 
+    { A Unix socket to make in Run (see BinkControl); '' = none. }
+    property ControlPath : String read FControlPath write FControlPath;
+
     { Runs until Stop.  Result: 0 = stopped, 1 = could not start / fatal. }
     function Run : Integer;
 
@@ -122,6 +170,10 @@ type
   end;
 
 function NowSec : Int64;
+function UnixNow : Int64;
+
+{ z:n/f, with .p only for a point }
+function FmtAddr(const A : TFTNAddress) : String;
 
 { Seconds to wait after Failures failed calls in a row (1 = the first). }
 function BackoffSeconds(Failures, RetryMin, RetryMax : Integer) : Integer;
@@ -133,11 +185,25 @@ uses
   {$IFDEF UNIX}
   BaseUnix,
   {$ENDIF}
+  DateUtils,
   BinkOutbound;
 
 function NowSec : Int64;
 begin
   Result := GetTickCount64 div 1000;
+end;
+
+function FmtAddr(const A : TFTNAddress) : String;
+begin
+  Result := Format('%d:%d/%d', [A.Zone, A.Net, A.Node]);
+
+  if A.Point <> 0 then
+    Result := Result + '.' + IntToStr(A.Point);
+end;
+
+function UnixNow : Int64;
+begin
+  Result := DateTimeToUnix(Now, False);
 end;
 
 function BackoffSeconds(Failures, RetryMin, RetryMax : Integer) : Integer;
@@ -165,10 +231,11 @@ end;
 
 constructor TPollThread.Create(AState : TLinkState; const ACfg : TBinkConfig;
   const ANode : TBinkNodeInfo; const AInboundPath : String;
-  ABso : TBinkBso; ALog : TBinkLogEvent);
+  ABso : TBinkBso; ALog : TBinkLogEvent; AOnEnded : TSessionEnded);
 begin
   inherited Create(True);
   FreeOnTerminate := False;
+  FOnEnded := AOnEnded;
   FState := AState;
   FNode := ANode;
   FInbound := TBinkInbound.Create(AInboundPath);
@@ -176,7 +243,7 @@ begin
   FSession.Inbound := FInbound;
   FSession.Bso := ABso;
   FSession.OnLog := ALog;
-  FSession.LogPrefix := '[poll ' + AddressToString(ANode.Address) + '] ';
+  FSession.LogPrefix := '[poll ' + FmtAddr(ANode.Address) + '] ';
 end;
 
 destructor TPollThread.Destroy;
@@ -197,6 +264,9 @@ begin
       FError := E.Message;
     end;
   end;
+
+  if Assigned(FOnEnded) then
+    FOnEnded(FSession);
 end;
 
 procedure TPollThread.Cancel;
@@ -234,10 +304,16 @@ begin
   FStates.Sorted := True;
   FStates.OwnsObjects := True;
   FPolls := TFPList.Create;
+  InitCriticalSection(FSessLock);
+  FSess := TFPList.Create;
+  FRing := TStringList.Create;
 end;
 
 destructor TBinkMailer.Destroy;
 begin
+  FRing.Free;
+  FSess.Free;
+  DoneCriticalSection(FSessLock);
   FPolls.Free;
   FStates.Free;
   FSetup.Free;
@@ -247,8 +323,41 @@ end;
 
 procedure TBinkMailer.Log(const Msg : String);
 begin
+  EmitLog(Msg);
+end;
+
+{ every log line: out, into the ring for clients that connect later, and
+  queued for the clients that are connected now }
+procedure TBinkMailer.EmitLog(const Msg : String);
+var
+  L : String;
+  I : Integer;
+begin
   if Assigned(FLog) then
     FLog(Msg);
+
+  L := Msg;
+
+  for I := 1 to Length(L) do
+    if L[I] in [#9, #10, #13] then
+      L[I] := ' ';
+
+  L := IntToStr(UnixNow) + #9 + L;
+
+  EnterCriticalSection(FSessLock);
+  try
+    FRing.Add(L);
+
+    while FRing.Count > 200 do
+      FRing.Delete(0);
+
+    if FControl <> nil then
+      FPendLog := FPendLog + 'LOG ' + L + #10;
+
+    FDirty := True;
+  finally
+    LeaveCriticalSection(FSessLock);
+  end;
 end;
 
 procedure TBinkMailer.Stop;
@@ -266,7 +375,7 @@ var
   I : Integer;
   K : String;
 begin
-  K := AddressToString(Link.Address);
+  K := FmtAddr(Link.Address);
   I := FStates.IndexOf(K);
 
   if I >= 0 then
@@ -313,7 +422,7 @@ begin
   Result := '';
 
   for I := 0 to High(S.Addresses) do
-    Result := Result + AddressToString(S.Addresses[I]) + ' ';
+    Result := Result + FmtAddr(S.Addresses[I]) + ' ';
 
   Result := Result + Format('|%s|%s|%s|%s|%s|%s|%d|%s|%d|%s|%d|%d|%d|%s|%s',
     [S.Domain, S.SysName, S.Sysop, S.Location, S.Inbound, S.Bso, S.Zone,
@@ -331,7 +440,7 @@ begin
   S := '';
 
   for I := 0 to High(FSetup.Addresses) do
-    S := S + ' ' + AddressToString(FSetup.Addresses[I]);
+    S := S + ' ' + FmtAddr(FSetup.Addresses[I]);
 
   Log('Our address(es):' + S);
   Log('Inbound: ' + FSetup.Inbound + '   BSO outbound: ' +
@@ -358,7 +467,7 @@ begin
           100 * Ord(L.PollMin > 0)) + Copy('call when mail waits', 1,
           100 * Ord(L.PollMin = 0))]);
 
-    Log(Format('Link %s %s: %s', [AddressToString(L.Address), L.Name, S]));
+    Log(Format('Link %s %s: %s', [FmtAddr(L.Address), L.Name, S]));
   end;
 end;
 
@@ -415,6 +524,7 @@ end;
 procedure TBinkMailer.NewSession(Sender : TObject; Session : TBinkSession);
 begin
   Session.OnAuth := @Auth;
+  SessAdd(Session, False);
 
   if FBso <> nil then
     Session.Bso := FBso;
@@ -442,13 +552,36 @@ begin
   Cfg := FSetup.SessionConfig(Link);
 
   Log(Format('Calling %s %s at %s:%d (%s)',
-    [AddressToString(Link.Address), Link.Name, Link.Host, Link.Port, Why]));
+    [FmtAddr(Link.Address), Link.Name, Link.Host, Link.Port, Why]));
 
   T := TPollThread.Create(St, Cfg, Node, FSetup.Inbound, FBso,
-    FLog);
+    @EmitLog, @SessRemove);
   St.Active := True;
+  St.Force := False;
+  Inc(FCalls);
+  SessAdd(T.Session, True);
   FPolls.Add(T);
+  FDirty := True;
   T.Start;
+end;
+
+procedure TBinkMailer.ProbeLink(St : TLinkState);
+begin
+  try
+    St.PendCount := 0;
+    St.PendBytes := 0;
+
+    if FBso <> nil then
+      St.PendCount := FBso.PendingInfo(St.Address, False, St.PendBytes);
+
+    St.Waiting := St.PendCount > 0;
+  except
+    on E : Exception do
+    begin
+      St.Waiting := False;
+      Log('Outbound error for ' + St.Key + ': ' + E.Message);
+    end;
+  end;
 end;
 
 procedure TBinkMailer.Schedule;
@@ -479,17 +612,17 @@ begin
       Continue;
 
     if ScanDue then
-      try
-        St.Waiting := (FBso <> nil) and (FBso.Pending(L.Address, False) > 0);
-      except
-        on E : Exception do
-        begin
-          St.Waiting := False;
-          Log('Outbound error for ' + St.Key + ': ' + E.Message);
-        end;
-      end;
+      ProbeLink(St);
 
-    if Now_ < St.NextAttempt then
+    if St.Force then
+    begin
+      if ActivePolls < FSetup.MaxPolls then
+        StartPoll(L, St, 'poll requested');
+
+      Continue;
+    end;
+
+    if St.Held or (Now_ < St.NextAttempt) then
       Continue;
 
     Due := False;
@@ -522,8 +655,11 @@ begin
   St.LastPoll := NowSec;
   St.Waiting := False;
 
+  FDirty := True;
+
   if T.Ok then
   begin
+    Inc(FCallsOk);
     St.Failures := 0;
     St.LastResult := 'ok';
     St.NextAttempt := 0;
@@ -548,10 +684,17 @@ begin
   end
   else
   begin
+    Inc(FCallsFailed);
     Inc(St.Failures);
     Wait := BackoffSeconds(St.Failures, FSetup.RetryMin, FSetup.RetryMax);
     St.NextAttempt := NowSec + Wait;
-    St.LastResult := 'failed';
+    St.LastResult := T.Error;
+
+    if St.LastResult = '' then
+      St.LastResult := T.Session.LastError;
+
+    if St.LastResult = '' then
+      St.LastResult := 'failed';
 
     if T.Error <> '' then
       Log('Call to ' + St.Key + ' failed: ' + T.Error);
@@ -614,11 +757,433 @@ begin
   Log(Format('Settings loaded: %d link(s)', [FSetup.LinkCount]));
 end;
 
-function TBinkMailer.Run : Integer;
+
+{ ------------------------------------------------------------------ }
+{ Sessions going on, and the control socket                           }
+{ ------------------------------------------------------------------ }
+
+procedure TBinkMailer.SessAdd(S : TBinkSession; Orig : Boolean);
+var
+  E : TSessEntry;
+begin
+  E := TSessEntry.Create;
+  E.Sess := S;
+  E.Originating := Orig;
+  E.Start := UnixNow;
+  E.P := Default(TBinkProgress);
+  E.P.Originating := Orig;
+
+  EnterCriticalSection(FSessLock);
+  try
+    Inc(FNextId);
+    E.Id := FNextId;
+    FSess.Add(E);
+    FDirty := True;
+  finally
+    LeaveCriticalSection(FSessLock);
+  end;
+
+  S.OnProgress := @SessProgress;
+end;
+
+procedure TBinkMailer.SessProgress(Sender : TObject; const P : TBinkProgress);
 var
   I : Integer;
 begin
+  EnterCriticalSection(FSessLock);
+  try
+    for I := 0 to FSess.Count - 1 do
+      if TSessEntry(FSess[I]).Sess = Sender then
+      begin
+        TSessEntry(FSess[I]).P := P;
+        Break;
+      end;
+  finally
+    LeaveCriticalSection(FSessLock);
+  end;
+end;
+
+{ Called by the session's own thread when it is over, before the session is
+  freed, so an entry always has a live session. }
+procedure TBinkMailer.SessRemove(S : TBinkSession);
+var
+  I : Integer;
+  E : TSessEntry;
+begin
+  EnterCriticalSection(FSessLock);
+  try
+    for I := FSess.Count - 1 downto 0 do
+    begin
+      E := TSessEntry(FSess[I]);
+
+      if E.Sess = S then
+      begin
+        Inc(FTotSent, S.BytesSent);
+        Inc(FTotRecv, S.BytesReceived);
+        Inc(FTotFilesSent, S.FilesSent);
+        Inc(FTotFilesRecv, S.FilesReceived);
+
+        if not E.Originating then
+          Inc(FInSessions);
+
+        FSess.Delete(I);
+        E.Free;
+        FDirty := True;
+        Break;
+      end;
+    end;
+  finally
+    LeaveCriticalSection(FSessLock);
+  end;
+end;
+
+procedure TBinkMailer.InboundDone(Sender : TObject; Session : TBinkSession);
+begin
+  SessRemove(Session);
+end;
+
+function Clean(const S : String) : String;
+var
+  I : Integer;
+begin
+  Result := S;
+
+  for I := 1 to Length(Result) do
+    if Result[I] in [#9, #10, #13] then
+      Result[I] := ' ';
+end;
+
+function TBinkMailer.FindLinkState(const Key : String) : TLinkState;
+var
+  I : Integer;
+begin
+  Result := nil;
+  I := FStates.IndexOf(Key);
+
+  if I >= 0 then
+    Result := TLinkState(FStates.Objects[I]);
+end;
+
+{ The whole picture, as lines between STATE and END (tab separated):
+
+    STATE <unix time now>
+    ME    addresses \t system name \t sysop \t started \t listen port (0 = no) \t version
+    STAT  calls made \t ok \t failed \t calls answered \t bytes sent \t received \t files sent \t received
+    LINK  address \t name \t host:port \t flags (A answers only, H held) \t poll min \t state \t failures \t
+          next call (unix, 0 = now / not planned) \t last result \t items waiting \t bytes waiting \t last call (unix, 0 = never)
+    SESS  id \t O|I \t remote addresses \t system \t sysop \t location \t start \t state \t options \t
+          bytes sent \t received \t files sent \t received \t sending \t pos \t size \t receiving \t pos \t size
+    END }
+function TBinkMailer.BuildState : String;
+var
+  I : Integer;
+  L : TBinkLink;
+  St : TLinkState;
+  E : TSessEntry;
+  S, Fl, Stt, Opts, Dir, Next : String;
+  U, NextU : Int64;
+  PortN : Integer;
+  Names : String;
+
+const
+  STATE_NAMES : array[TBinkState] of String =
+    ('connecting', 'connected', 'authenticating', 'transfer',
+     'finishing', 'done');
+begin
+  U := UnixNow;
+  Result := 'STATE ' + IntToStr(U) + #10;
+  Names := '';
+
+  for I := 0 to High(FSetup.Addresses) do
+  begin
+    if Names <> '' then
+      Names := Names + ' ';
+
+    Names := Names + FmtAddr(FSetup.Addresses[I]);
+  end;
+
+  if FSetup.Listen then
+    PortN := FSetup.Port
+  else
+    PortN := 0;
+
+  Result := Result + 'ME ' + Names + #9 + Clean(FSetup.SysName) + #9 +
+    Clean(FSetup.Sysop) + #9 + IntToStr(FStarted) + #9 + IntToStr(PortN) +
+    #9 + BINK_VERSION_STRING + #10;
+
+  EnterCriticalSection(FSessLock);
+  try
+    Result := Result + Format('STAT %d'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d'#10,
+      [FCalls, FCallsOk, FCallsFailed, FInSessions, FTotSent, FTotRecv,
+       FTotFilesSent, FTotFilesRecv]);
+
+    for I := 0 to FSess.Count - 1 do
+    begin
+      E := TSessEntry(FSess[I]);
+
+      if E.Originating then
+        Dir := 'O'
+      else
+        Dir := 'I';
+
+      Opts := '';
+
+      if E.P.Secure then Opts := Opts + 'secure ';
+      if E.P.Plz then Opts := Opts + 'plz ';
+      if E.P.Nr then Opts := Opts + 'nr ';
+
+      Result := Result + Format('SESS %d'#9'%s'#9'%s'#9'%s'#9'%s'#9'%s'#9'%d'#9 +
+        '%s'#9'%s'#9'%d'#9'%d'#9'%d'#9'%d'#9'%s'#9'%d'#9'%d'#9'%s'#9'%d'#9'%d'#10,
+        [E.Id, Dir, Clean(E.P.Remote), Clean(E.P.SysName), Clean(E.P.Sysop),
+         Clean(E.P.Location), E.Start, STATE_NAMES[E.P.State], Trim(Opts),
+         E.P.BytesSent, E.P.BytesReceived, E.P.FilesSent, E.P.FilesReceived,
+         Clean(E.P.TxName), E.P.TxPos, E.P.TxSize,
+         Clean(E.P.RxName), E.P.RxPos, E.P.RxSize]);
+    end;
+  finally
+    LeaveCriticalSection(FSessLock);
+  end;
+
+  for I := 0 to FSetup.LinkCount - 1 do
+  begin
+    L := FSetup.Links[I];
+    St := State(L);
+    Fl := '';
+
+    if L.AnswerOnly then Fl := Fl + 'A';
+    if St.Held then Fl := Fl + 'H';
+
+    if L.AnswerOnly then
+      Stt := 'answer'
+    else if L.Host = '' then
+      Stt := 'nohost'
+    else if St.Active then
+      Stt := 'calling'
+    else if St.Held then
+      Stt := 'held'
+    else if (St.Failures > 0) and (St.NextAttempt > NowSec) then
+      Stt := 'retry'
+    else if St.Waiting then
+      Stt := 'waiting'
+    else
+      Stt := 'idle';
+
+    NextU := 0;
+
+    if (not L.AnswerOnly) and (L.Host <> '') and (not St.Active) then
+    begin
+      if St.NextAttempt > NowSec then
+        NextU := U + (St.NextAttempt - NowSec)
+      else if (L.PollMin > 0) and (St.LastPoll >= 0) then
+        NextU := U + (St.LastPoll + L.PollMin * 60 - NowSec);
+    end;
+
+    if St.LastPoll >= 0 then
+      Next := IntToStr(U - (NowSec - St.LastPoll))
+    else
+      Next := '0';
+
+    Result := Result + Format('LINK %s'#9'%s'#9'%s'#9'%s'#9'%d'#9'%s'#9'%d'#9 +
+      '%d'#9'%s'#9'%d'#9'%d'#9'%s'#10,
+      [FmtAddr(L.Address), Clean(L.Name),
+       Clean(L.Host) + Copy(':' + IntToStr(L.Port), 1, 10 * Ord(L.Host <> '')),
+       Fl, L.PollMin, Stt, St.Failures, NextU, Clean(St.LastResult),
+       St.PendCount, St.PendBytes, Next]);
+  end;
+
+  Result := Result + 'END'#10;
+end;
+
+function TBinkMailer.Hello : String;
+var
+  I : Integer;
+begin
+  Result := 'HELLO ' + BINK_VERSION_STRING + #9'1'#10;
+
+  EnterCriticalSection(FSessLock);
+  try
+    for I := 0 to FRing.Count - 1 do
+      Result := Result + 'LOG ' + FRing[I] + #10;
+  finally
+    LeaveCriticalSection(FSessLock);
+  end;
+
+  Result := Result + BuildState;
+end;
+
+function TBinkMailer.HandleCommand(const Cmd : String) : String;
+var
+  Verb, Arg : String;
+  P, I, N : Integer;
+  A : TFTNAddress;
+  L : TBinkLink;
+  St : TLinkState;
+  E : TSessEntry;
+  Id : Integer;
+begin
+  P := Pos(' ', Cmd);
+
+  if P = 0 then
+  begin
+    Verb := UpperCase(Cmd);
+    Arg := '';
+  end
+  else
+  begin
+    Verb := UpperCase(Copy(Cmd, 1, P - 1));
+    Arg := Trim(Copy(Cmd, P + 1, MaxInt));
+  end;
+
+  FDirty := True;
+  Result := 'ERR unknown command ' + Verb;
+
+  if Verb = 'PING' then
+    Result := 'ACK pong'
+  else if Verb = 'RESCAN' then
+  begin
+    FLastScan := 0;
+    Result := 'ACK looking at the outbound';
+  end
+  else if Verb = 'RELOAD' then
+  begin
+    FReload := True;
+    Result := 'ACK reading the settings again';
+  end
+  else if Verb = 'ABORT' then
+  begin
+    Id := StrToIntDef(Arg, -1);
+    Result := 'ERR no such session';
+
+    EnterCriticalSection(FSessLock);
+    try
+      for I := 0 to FSess.Count - 1 do
+      begin
+        E := TSessEntry(FSess[I]);
+
+        if E.Id = Id then
+        begin
+          E.Sess.Cancel;
+          Result := 'ACK session ' + IntToStr(Id) + ' is being ended';
+          Break;
+        end;
+      end;
+    finally
+      LeaveCriticalSection(FSessLock);
+    end;
+  end
+  else if (Verb = 'POLL') or (Verb = 'HOLD') or (Verb = 'FREE') then
+  begin
+    if (Verb = 'POLL') and (Arg = '*') then
+    begin
+      N := 0;
+
+      for I := 0 to FSetup.LinkCount - 1 do
+      begin
+        L := FSetup.Links[I];
+        St := State(L);
+
+        if L.AnswerOnly or (L.Host = '') or St.Active then
+          Continue;
+
+        ProbeLink(St);
+
+        if St.Waiting then
+        begin
+          St.Force := True;
+          Inc(N);
+        end;
+      end;
+
+      if N = 0 then
+        Result := 'ERR no link has mail waiting'
+      else
+        Result := 'ACK ' + IntToStr(N) + ' link(s) will be called';
+
+      Exit;
+    end;
+
+    if not TryParseAddress(Arg, A) then
+      Exit('ERR "' + Arg + '" is not an address');
+
+    L := FSetup.FindLink(A);
+
+    if L = nil then
+      Exit('ERR ' + FmtAddr(A) + ' is not a link');
+
+    St := State(L);
+
+    if Verb = 'HOLD' then
+    begin
+      St.Held := True;
+      Result := 'ACK ' + St.Key + ' is held';
+    end
+    else if Verb = 'FREE' then
+    begin
+      St.Held := False;
+      Result := 'ACK ' + St.Key + ' is released';
+    end
+    else if L.AnswerOnly then
+      Result := 'ERR ' + St.Key + ' only answers calls'
+    else if L.Host = '' then
+      Result := 'ERR ' + St.Key + ' has no host to call'
+    else if St.Active then
+      Result := 'ERR ' + St.Key + ' is being called already'
+    else
+    begin
+      St.Force := True;
+      Result := 'ACK calling ' + St.Key;
+    end;
+  end;
+
+  Log('Control: ' + Cmd + ' -> ' + Result);
+end;
+
+procedure TBinkMailer.ControlTick;
+var
+  Now_, Lines : String;
+  T : QWord;
+  Active : Boolean;
+begin
+  if FControl = nil then
+    Exit;
+
+  FControl.Tick;
+
+  EnterCriticalSection(FSessLock);
+  try
+    Lines := FPendLog;
+    FPendLog := '';
+    Active := FSess.Count > 0;
+  finally
+    LeaveCriticalSection(FSessLock);
+  end;
+
+  if (Lines <> '') and (FControl.ClientCount > 0) then
+    FControl.Broadcast(Lines);
+
+  if FControl.ClientCount = 0 then
+    Exit;
+
+  T := GetTickCount64;
+
+  if (FDirty and (T - FLastState >= 200)) or
+     (Active and (T - FLastState >= 250)) or
+     (T - FLastState >= 5000) then
+  begin
+    FDirty := False;
+    FLastState := T;
+    Now_ := BuildState;
+    FControl.Broadcast(Now_);
+  end;
+end;
+
+function TBinkMailer.Run : Integer;
+var
+  Tick : Integer;
+  Err : String;
+begin
   Result := 0;
+  Tick := 0;
 
   if not LoadSetup(FFile, FSetup) then
     Exit(1);
@@ -631,7 +1196,24 @@ begin
   FBso := nil;
   FListener := nil;
   FListenThr := nil;
+  FControl := nil;
+  FStarted := UnixNow;
   try
+    if FControlPath <> '' then
+    begin
+      FControl := TBinkControl.Create(FControlPath);
+      FControl.OnCommand := @HandleCommand;
+      FControl.OnHello := @Hello;
+
+      if FControl.Start(Err) then
+        Log('Control socket: ' + FControlPath)
+      else
+      begin
+        Log('WARNING: no control socket: ' + Err);
+        FreeAndNil(FControl);
+      end;
+    end;
+
     if FSetup.Bso <> '' then
       FBso := TBinkBso.Create(FSetup.Bso, FSetup.BsoZone)
     else
@@ -642,8 +1224,9 @@ begin
       FListener := TBinkListener.Create(FSetup.SessionConfig(nil),
         FInbound, FSetup.Port, FSetup.Bind);
       FListener.MaxSessions := FSetup.MaxSessions;
-      FListener.OnLog := FLog;
+      FListener.OnLog := @EmitLog;
       FListener.OnSession := @NewSession;
+      FListener.OnSessionDone := @InboundDone;
       FListenThr := TListenThread.Create(FListener);
       FListenThr.Start;
     end;
@@ -665,12 +1248,18 @@ begin
         Break;
       end;
 
-      ReapPolls(False);
-      Schedule;
+      Inc(Tick);
 
-      for I := 1 to 5 do
-        if not FStop then
-          Sleep(200);
+      if Tick mod 5 = 0 then
+      begin
+        ReapPolls(False);
+        Schedule;
+      end;
+
+      ControlTick;
+
+      if not FStop then
+        Sleep(200);
     end;
 
     Log('Mailer stopping');
@@ -687,6 +1276,7 @@ begin
     end;
 
     FListener.Free;
+    FControl.Free;
     FBso.Free;
     FInbound.Free;
   end;
