@@ -35,7 +35,7 @@ generates that file from its own configuration (tool `mkbinkcfg`, in the mk-fpc 
 Separate process, supervised by mklisten (`"mailer"` port type in mklisten.json).  Phases:
 
 1. **mkbink reads a links file; `run`/`check` modes** - DONE (this repo).
-2. mk-fpc: new mailer records in `config.mk`, `mkconfig` page, `mkbinkcfg` tool that writes the links file (mode 0600).
+2. **DONE** (mk-fpc repo): mailer settings in `Mailer.Mk` (new file, record `MailerCfgType` in `src/MKGlobT.pas`, 64 links, 1 KB expansion, reserved file-request fields), `mkconfig` pages EchoMail > Mailer / Mailer Links (`src/CfgMail.pas`), `mkbinkcfg` writes the links file (mode 0600, replaced all at once, untouched when nothing changed, exit 3 = mailer not enabled).  Own address(es), name, sysop, location come from Config.Mk; inbound and BSO directories are the EchoMail Options (EchoCfg.Mk), relative ones from the BBS directory.  The links file is the contract: mkbinkcfg must keep writing `version 1` until this repo's `BINK_LINKS_VERSION` changes.
 3. mklisten supervises (`mailer` port type, restart with backoff, SIGHUP on reload, install + systemd).
 4. mkbink control socket (localhost, Unix) with structured events + commands (poll now, hold/release, rescan, reload);
    mkmon "Mailer" screen in the style of the old Frontdoor status screen.
