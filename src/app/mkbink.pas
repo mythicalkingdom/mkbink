@@ -23,11 +23,14 @@ uses
   BinkOutbound,
   BinkBso,
   BinkSession,
-  BinkListener;
+  BinkListener,
+  BinkLinks,
+  BinkMailer;
 
 type
   TOptions = record
     Mode      : String;
+    LinksFile : String;      { run / check: the settings file }
     Target    : String;      { poll: host[:port] }
     Config    : TBinkConfig;
     Remote    : String;      { poll: expected address; listen: ';' list }
@@ -77,6 +80,7 @@ type
 
 var
   GListener : TBinkListener;
+  GMailer   : TBinkMailer;
 
 constructor TLog.Create;
 begin
@@ -109,6 +113,8 @@ begin
   Writeln('  mkbink poll <host[:port]> -a <our addr> [-r <remote addr>] [options]');
   Writeln('  mkbink listen -a <our addr> [options]');
   Writeln('  mkbink queue -O <bso dir> -t <addr> [-F flavour] [-x] <file>...');
+  Writeln('  mkbink run -f <settings file>      answer calls and call the links in the file');
+  Writeln('  mkbink check -f <settings file>    check the settings file and show what it says');
   Writeln;
   Writeln('Options:');
   Writeln('  -a ADDR   our FTN address, e.g. 1:123/456 (required for poll/listen)');
@@ -152,6 +158,10 @@ begin
   Writeln('            only for links that keep dropping: it is slower');
   Writeln;
   Writeln('Exit status of poll: 0 = session completed, 1 = failed.');
+  Writeln;
+  Writeln('run keeps going until SIGINT / SIGTERM; SIGHUP reads the settings file');
+  Writeln('again (links, passwords and intervals; addresses, paths and port need a');
+  Writeln('restart).  The file format is described at the top of src/lib/binklinks.pas.');
 end;
 
 function NeedArg(Idx : Integer; const Opt : String) : String;
@@ -187,6 +197,7 @@ begin
   O.HaveAddr := False;
   O.Password := GetEnvironmentVariable('BINK_PASSWORD');
   O.Mode := '';
+  O.LinksFile := '';
   O.Target := '';
   O.Remote := '';
   O.BindAddr := '';
@@ -212,7 +223,7 @@ begin
   end;
 
   if (O.Mode <> 'poll') and (O.Mode <> 'listen') and
-     (O.Mode <> 'queue') then
+     (O.Mode <> 'queue') and (O.Mode <> 'run') and (O.Mode <> 'check') then
   begin
     Writeln(StdErr, 'Unknown command "', O.Mode, '"');
     Usage;
@@ -232,6 +243,11 @@ begin
       Inc(I);
       O.Config.Address := ParseAddress(NeedArg(I, A));
       O.HaveAddr := True;
+    end
+    else if A = '-f' then
+    begin
+      Inc(I);
+      O.LinksFile := NeedArg(I, A);
     end
     else if A = '-r' then
     begin
@@ -343,6 +359,15 @@ begin
   end;
 
   O.Config.Password := O.Password;
+
+  if (O.Mode = 'run') or (O.Mode = 'check') then
+  begin
+    if O.LinksFile = '' then
+      Die(O.Mode + ' needs -f <settings file>');
+
+    Allowed.Free;
+    Exit;
+  end;
 
   if O.Mode = 'queue' then
   begin
@@ -609,6 +634,86 @@ begin
   end;
 end;
 
+{$IFDEF UNIX}
+procedure HandleRunSignal(Sig : cint); cdecl;
+begin
+  if GMailer = nil then
+    Exit;
+
+  if Sig = SIGHUP then
+    GMailer.RequestReload
+  else
+    GMailer.Stop;
+end;
+{$ENDIF}
+
+function DoRun(var O : TOptions) : Integer;
+var
+  Lg : TLog;
+begin
+  Lg := TLog.Create;
+  GMailer := TBinkMailer.Create(O.LinksFile, @Lg.Print);
+  try
+    {$IFDEF UNIX}
+    fpSignal(SIGINT,  @HandleRunSignal);
+    fpSignal(SIGTERM, @HandleRunSignal);
+    fpSignal(SIGHUP,  @HandleRunSignal);
+    {$ENDIF}
+    Result := GMailer.Run;
+  finally
+    FreeAndNil(GMailer);
+    Lg.Free;
+  end;
+end;
+
+function DoCheck(var O : TOptions) : Integer;
+var
+  S : TBinkSetup;
+  Errs, Warns : TStringList;
+  I : Integer;
+  L : TBinkLink;
+begin
+  S := TBinkSetup.Create;
+  Errs := TStringList.Create;
+  Warns := TStringList.Create;
+  try
+    if S.LoadFromFile(O.LinksFile, Errs, Warns) then
+      Result := 0
+    else
+      Result := 1;
+
+    for I := 0 to Warns.Count - 1 do
+      Writeln('warning: ', Warns[I]);
+
+    for I := 0 to Errs.Count - 1 do
+      Writeln('error: ', Errs[I]);
+
+    if Result <> 0 then
+      Exit;
+
+    for I := 0 to High(S.Addresses) do
+      Writeln('address ', AddressToString(S.Addresses[I]));
+
+    Writeln('inbound ', S.Inbound, '   bso ', S.Bso, '   zone ', S.BsoZone);
+    Writeln('listen ', BoolToStr(S.Listen, 'yes', 'no'), '   port ', S.Port,
+      '   bind ', S.Bind);
+
+    for I := 0 to S.LinkCount - 1 do
+    begin
+      L := S.Links[I];
+      Writeln('link ', AddressToString(L.Address), '  host ', L.Host, ':',
+        L.Port, '  poll ', L.PollMin, '  answer-only ',
+        BoolToStr(L.AnswerOnly, 'yes', 'no'), '  name ', L.Name);
+    end;
+
+    Writeln('ok: ', S.LinkCount, ' link(s)');
+  finally
+    Warns.Free;
+    Errs.Free;
+    S.Free;
+  end;
+end;
+
 function DoQueue(var O : TOptions) : Integer;
 var
   Target : TFTNAddress;
@@ -650,6 +755,10 @@ begin
       Halt(DoPoll(Opts))
     else if Opts.Mode = 'queue' then
       Halt(DoQueue(Opts))
+    else if Opts.Mode = 'run' then
+      Halt(DoRun(Opts))
+    else if Opts.Mode = 'check' then
+      Halt(DoCheck(Opts))
     else
       Halt(DoListen(Opts));
   except

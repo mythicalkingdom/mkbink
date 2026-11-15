@@ -409,9 +409,16 @@ begin
 end;
 
 procedure TBinkSession.SendADR;
+var
+  S : String;
+  I : Integer;
 begin
-  SendCmd(M_ADR,
-    AddressToString5D(FConfig.Address, FConfig.Domain));
+  S := AddressToString5D(FConfig.Address, FConfig.Domain);
+
+  for I := 0 to High(FConfig.Akas) do
+    S := S + ' ' + AddressToString5D(FConfig.Akas[I], FConfig.Domain);
+
+  SendCmd(M_ADR, S);
 end;
 
 { Waits for the next complete frame; raises on timeout, cancel or

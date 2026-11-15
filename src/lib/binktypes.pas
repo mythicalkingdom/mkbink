@@ -48,6 +48,7 @@ type
   { Local system identity and session settings (both sides). }
   TBinkConfig = record
     Address  : TFTNAddress;
+    Akas     : array of TFTNAddress; { more addresses, presented after Address }
     Domain   : String;   { e.g. 'fidonet'; appended to M_ADR when set }
     SysName  : String;
     Sysop    : String;

@@ -72,6 +72,11 @@ type
       IncludeHold : Boolean;
       Dest : TBinkOutbound) : Integer;
 
+    { How many items Collect would find for A (nothing is changed). }
+    function Pending(
+      const A : TFTNAddress;
+      IncludeHold : Boolean) : Integer;
+
     { Queues FileName for A: appends it to the flow file of the given
       flavour (I, C, D, N or H).  Returns the flow file's path. }
     function Attach(
@@ -347,6 +352,20 @@ begin
   finally
     Flow.Free;
     Found.Free;
+  end;
+end;
+
+function TBinkBso.Pending(
+  const A : TFTNAddress;
+  IncludeHold : Boolean) : Integer;
+var
+  Tmp : TBinkOutbound;
+begin
+  Tmp := TBinkOutbound.Create;
+  try
+    Result := Collect(A, IncludeHold, Tmp);
+  finally
+    Tmp.Free;
   end;
 end;
 
