@@ -1,0 +1,15 @@
+# compiler output
+/build/
+*.o
+*.ppu
+*.a
+*.compiled
+*.rsj
+*.pas~
+
+# runtime / test data
+/inbound/
+/outbound/
+/spool/
+*.part
+*.bsy
