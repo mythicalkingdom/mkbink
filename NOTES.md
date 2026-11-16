@@ -53,4 +53,10 @@ Later: tosser, netmail, file requests (config gives a "file request user" a leve
 * (fixed in phase 4) A remote that presents several addresses is accepted when at least one is known; the others are ignored.
 * A local `.bsy` lock held by an answering session makes a call to that link fail (counted as a failure, backoff).
 * Two callers receiving a file with identical name+size+time at once would share one `.part` file.
-* No IPv6, no file requests (.req), no binkd GZ/CRYPT/ND/NDA/MB/EXTCMD.
+* No IPv6, no file requests (.req), no binkd GZ/ND/NDA/MB/EXTCMD.
+* CRYPT has no setting in the links file (always on by default; `-E` on the command line disables it for poll/listen only).
+
+## CRYPT (src/lib/binkcrypt.pas, commit 760c6fd)
+
+Info-ZIP stream cipher as used by binkd and Synchronet.  Used automatically when the remote offers it, CRAM-MD5 was used, the password is real and the remote's `M_OK` says `secure` (a `non-secure` M_OK means the remote will not encrypt).  The originator sends `OPT CRYPT` before `M_PWD`; the answerer confirms with `OPT CRYPT` before `M_OK`.  `M_PWD` and `M_OK` are plaintext, everything after is encrypted, including frame headers.  Keys come from the password: originator->answerer stream = init(pw); answerer->originator = init("-") then pw bytes.
+Verified: cipher matches an independent C implementation; real binkd 1.1a (poll + 3 MB send); Synchronet 3.19b (handshake and clean session end, no files moved); mkbink<->mkbink both directions.  Weak cipher: prefer TLS for real privacy.
