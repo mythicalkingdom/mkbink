@@ -74,3 +74,4 @@ An alternative to BSO, chosen with `-M <netmail dir> -A <attach dir>` (instead o
 * Not verified against a real FrontDoor spool (none available): the attach-file naming is our own scheme, and FrontDoor's own flags (hold/direct bits are only read as Hold) were not checked.  `tests/attachtest.py` writes the `*.msg` files and parses the packets independently (python), including `run -f` mode.
 * Gaps: message text goes into the packet unchanged (INTL/FMPT/TOPT must already be in it, which MKMsgFid and `queue` do); `.msg` paths are limited to 110 characters by MKMsgFid; no routing (only messages addressed to the link itself).
 
+* mk-fpc's tosser (`mktoss`) is the `on-inbound` command when the sysop switches it on (mkbinkcfg writes the line); mklisten starts mkbink with `MK=<BBS config dir>` in its environment because the hook needs it.  Verified end to end by mk-fpc's `tests/tosshooktest.py`.
