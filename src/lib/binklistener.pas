@@ -55,6 +55,7 @@ type
   private
     FConfig   : TBinkConfig;
     FInbound  : TBinkInbound;
+    FInboundUn : TBinkInbound;
     FPort     : Word;
     FBindAddr : String;
     FStopped  : Boolean;
@@ -90,6 +91,10 @@ type
     { Safe to call from a signal handler: only sets a flag, which Run
       notices within half a second. }
     procedure Stop;
+
+    { Where callers that did not use a password put files; nil = Inbound. }
+    property InboundUnsecure : TBinkInbound
+      read FInboundUn write FInboundUn;
 
     property MaxSessions : Integer
       read FMax write FMax;
@@ -138,6 +143,7 @@ begin
   try
     Sess := TBinkSession.Create(FOwner.FConfig);
     Sess.Inbound   := FOwner.FInbound;
+    Sess.InboundUnsecure := FOwner.FInboundUn;
     Sess.OnLog     := FOwner.FOnLog;
     Sess.LogPrefix := Format('[#%d] ', [FId]);
 

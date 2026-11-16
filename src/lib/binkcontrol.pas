@@ -77,6 +77,7 @@ uses
   Sockets;
 
 const
+  FD_CLOEXEC = 1;
   MAX_OUT = 512 * 1024;
   MAX_IN  = 4096;
 
@@ -113,6 +114,7 @@ begin
   end;
 
   FListen := fpSocket(AF_UNIX, SOCK_STREAM, 0);
+  fpFcntl(FListen, F_SETFD, FD_CLOEXEC);   { not inherited by a command we run }
 
   if FListen < 0 then
   begin
@@ -211,6 +213,7 @@ begin
   while True do
   begin
     C := fpAccept(FListen, nil, nil);
+    fpFcntl(C, F_SETFD, FD_CLOEXEC);   { not inherited by a command we run }
 
     if C < 0 then
       Exit;

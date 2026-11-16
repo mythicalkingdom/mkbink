@@ -28,6 +28,7 @@ uses
   BinkSession,
   BinkListener,
   BinkInbound,
+  Process,
   BinkBso,
   BinkControl;
 
@@ -65,6 +66,7 @@ type
   private
     FSession : TBinkSession;
     FInbound : TBinkInbound;
+    FInboundUn : TBinkInbound;
     FNode    : TBinkNodeInfo;
     FState   : TLinkState;
     FOk      : Boolean;
@@ -74,7 +76,7 @@ type
     procedure Execute; override;
   public
     constructor Create(AState : TLinkState; const ACfg : TBinkConfig;
-      const ANode : TBinkNodeInfo; const AInboundPath : String;
+      const ANode : TBinkNodeInfo; const AInboundPath, AUnsecurePath : String;
       ABso : TBinkBso; ALog : TBinkLogEvent; AOnEnded : TSessionEnded);
     destructor Destroy; override;
     procedure Cancel;
@@ -105,6 +107,8 @@ type
     FReload    : Boolean;
     FBso       : TBinkBso;
     FInbound   : TBinkInbound;
+    FInboundUn : TBinkInbound;
+    FHookLock  : TRTLCriticalSection;
     FListener  : TBinkListener;
     FListenThr : TListenThread;
     FStates    : TStringList;       { Key -> TLinkState }
@@ -133,6 +137,7 @@ type
     procedure SessAdd(S : TBinkSession; Orig : Boolean);
     procedure SessProgress(Sender : TObject; const P : TBinkProgress);
     procedure SessRemove(S : TBinkSession);
+    procedure RunHook(S : TBinkSession; const Cmd : String; Timeout : Integer);
     procedure InboundDone(Sender : TObject; Session : TBinkSession);
     function  BuildState : String;
     function  Hello : String;
@@ -173,6 +178,7 @@ function NowSec : Int64;
 function UnixNow : Int64;
 
 { z:n/f, with .p only for a point }
+
 function FmtAddr(const A : TFTNAddress) : String;
 
 { Seconds to wait after Failures failed calls in a row (1 = the first). }
@@ -187,6 +193,17 @@ uses
   {$ENDIF}
   DateUtils,
   BinkOutbound;
+
+function Clean(const S : String) : String;
+var
+  I : Integer;
+begin
+  Result := S;
+
+  for I := 1 to Length(Result) do
+    if Result[I] in [#9, #10, #13] then
+      Result[I] := ' ';
+end;
 
 function NowSec : Int64;
 begin
@@ -230,7 +247,7 @@ end;
 { ------------------------------------------------------------------ }
 
 constructor TPollThread.Create(AState : TLinkState; const ACfg : TBinkConfig;
-  const ANode : TBinkNodeInfo; const AInboundPath : String;
+  const ANode : TBinkNodeInfo; const AInboundPath, AUnsecurePath : String;
   ABso : TBinkBso; ALog : TBinkLogEvent; AOnEnded : TSessionEnded);
 begin
   inherited Create(True);
@@ -241,6 +258,13 @@ begin
   FInbound := TBinkInbound.Create(AInboundPath);
   FSession := TBinkSession.Create(ACfg);
   FSession.Inbound := FInbound;
+
+  if AUnsecurePath <> '' then
+  begin
+    FInboundUn := TBinkInbound.Create(AUnsecurePath);
+    FSession.InboundUnsecure := FInboundUn;
+  end;
+
   FSession.Bso := ABso;
   FSession.OnLog := ALog;
   FSession.LogPrefix := '[poll ' + FmtAddr(ANode.Address) + '] ';
@@ -250,6 +274,7 @@ destructor TPollThread.Destroy;
 begin
   FSession.Free;
   FInbound.Free;
+  FInboundUn.Free;
   inherited Destroy;
 end;
 
@@ -305,6 +330,7 @@ begin
   FStates.OwnsObjects := True;
   FPolls := TFPList.Create;
   InitCriticalSection(FSessLock);
+  InitCriticalSection(FHookLock);
   FSess := TFPList.Create;
   FRing := TStringList.Create;
 end;
@@ -314,6 +340,7 @@ begin
   FRing.Free;
   FSess.Free;
   DoneCriticalSection(FSessLock);
+  DoneCriticalSection(FHookLock);
   FPolls.Free;
   FStates.Free;
   FSetup.Free;
@@ -425,7 +452,7 @@ begin
     Result := Result + FmtAddr(S.Addresses[I]) + ' ';
 
   Result := Result + Format('|%s|%s|%s|%s|%s|%s|%d|%s|%d|%s|%d|%d|%d|%s|%s',
-    [S.Domain, S.SysName, S.Sysop, S.Location, S.Inbound, S.Bso, S.Zone,
+    [S.Domain, S.SysName, S.Sysop, S.Location, S.Inbound + '>' + S.InboundUnsecure, S.Bso, S.Zone,
      BoolToStr(S.Listen, True), S.Port, S.Bind, S.MaxSessions, S.MaxPolls,
      S.Timeout, BoolToStr(S.RequireCram, True),
      BoolToStr(S.Plz, True) + BoolToStr(S.Nr, True)]);
@@ -445,6 +472,12 @@ begin
   Log('Our address(es):' + S);
   Log('Inbound: ' + FSetup.Inbound + '   BSO outbound: ' +
     FSetup.Bso + '   default zone ' + IntToStr(FSetup.BsoZone));
+
+  if FSetup.InboundUnsecure <> '' then
+    Log('Inbound without password: ' + FSetup.InboundUnsecure);
+
+  if FSetup.OnInbound <> '' then
+    Log('After received files: ' + FSetup.OnInbound);
 
   if FSetup.Listen then
     Log(Format('Listening on %s:%d (up to %d callers)',
@@ -554,8 +587,8 @@ begin
   Log(Format('Calling %s %s at %s:%d (%s)',
     [FmtAddr(Link.Address), Link.Name, Link.Host, Link.Port, Why]));
 
-  T := TPollThread.Create(St, Cfg, Node, FSetup.Inbound, FBso,
-    @EmitLog, @SessRemove);
+  T := TPollThread.Create(St, Cfg, Node, FSetup.Inbound,
+    FSetup.InboundUnsecure, FBso, @EmitLog, @SessRemove);
   St.Active := True;
   St.Force := False;
   Inc(FCalls);
@@ -809,6 +842,8 @@ procedure TBinkMailer.SessRemove(S : TBinkSession);
 var
   I : Integer;
   E : TSessEntry;
+  Cmd : String;
+  Tmo : Integer;
 begin
   EnterCriticalSection(FSessLock);
   try
@@ -835,22 +870,156 @@ begin
   finally
     LeaveCriticalSection(FSessLock);
   end;
+
+  if S.Received.Count > 0 then
+  begin
+    EnterCriticalSection(FLock);
+    try
+      Cmd := FSetup.OnInbound;
+      Tmo := FSetup.HookTimeout;
+    finally
+      LeaveCriticalSection(FLock);
+    end;
+
+    if Cmd <> '' then
+      RunHook(S, Cmd, Tmo);
+  end;
+end;
+
+{ The command named by on-inbound, run without a shell with the paths of the
+  files this session received as its arguments, and in its environment
+    MKBINK_REMOTE   the remote's addresses
+    MKBINK_SECURE   1 if the remote used a password, else 0
+    MKBINK_ORIG     1 if we called, 0 if it called us
+    MKBINK_FILES    the number of files
+  One at a time (a tosser does not want two of itself); killed after the
+  timeout.  Its output goes into the log. }
+procedure TBinkMailer.RunHook(S : TBinkSession; const Cmd : String;
+  Timeout : Integer);
+var
+  P     : TProcess;
+  Parts : TStringList;
+  I     : Integer;
+  Buf   : String;
+  Got   : LongInt;
+  Start : QWord;
+  Rest  : String;
+  Killed : Boolean;
+
+  procedure Flush(All : Boolean);
+  var
+    K : Integer;
+    L : String;
+  begin
+    repeat
+      K := Pos(#10, Rest);
+
+      if K = 0 then
+      begin
+        if All and (Rest <> '') then
+        begin
+          Log('[hook] ' + Clean(Rest));
+          Rest := '';
+        end;
+
+        Break;
+      end;
+
+      L := Copy(Rest, 1, K - 1);
+      Delete(Rest, 1, K);
+      Log('[hook] ' + Clean(L));
+    until False;
+  end;
+
+  procedure Drain;
+  begin
+    while P.Output.NumBytesAvailable > 0 do
+    begin
+      SetLength(Buf, 4096);
+      Got := P.Output.Read(Buf[1], 4096);
+
+      if Got <= 0 then
+        Break;
+
+      Rest := Rest + Copy(Buf, 1, Got);
+    end;
+
+    Flush(False);
+  end;
+
+begin
+  EnterCriticalSection(FHookLock);
+  Parts := TStringList.Create;
+  P := TProcess.Create(nil);
+  Rest := '';
+  Killed := False;
+  try
+    try
+      CommandToList(Cmd, Parts);
+
+      if Parts.Count = 0 then
+        Exit;
+
+      P.Executable := Parts[0];
+
+      for I := 1 to Parts.Count - 1 do
+        P.Parameters.Add(Parts[I]);
+
+      for I := 0 to S.Received.Count - 1 do
+        P.Parameters.Add(S.Received[I]);
+
+      for I := 1 to GetEnvironmentVariableCount do
+        P.Environment.Add(GetEnvironmentString(I));
+
+      P.Environment.Add('MKBINK_REMOTE=' + S.RemoteAddresses);
+      P.Environment.Add('MKBINK_SECURE=' + IntToStr(Ord(S.Secure)));
+      P.Environment.Add('MKBINK_ORIG=' + IntToStr(Ord(S.Originating)));
+      P.Environment.Add('MKBINK_FILES=' + IntToStr(S.Received.Count));
+      P.Options := [poUsePipes, poStderrToOutPut, poNoConsole];
+
+      Log(Format('Running %s (%d file(s) from %s)',
+        [Parts[0], S.Received.Count, S.RemoteAddresses]));
+      P.Execute;
+      Start := GetTickCount64;
+
+      while P.Running do
+      begin
+        Drain;
+
+        if (GetTickCount64 - Start) > QWord(Timeout) * 1000 then
+        begin
+          Killed := True;
+          P.Terminate(9);
+          Break;
+        end;
+
+        Sleep(50);
+      end;
+
+      P.WaitOnExit;
+      Drain;
+      Flush(True);
+
+      if Killed then
+        Log('[hook] killed after ' + IntToStr(Timeout) + ' s')
+      else if P.ExitStatus <> 0 then
+        Log('[hook] exit status ' + IntToStr(P.ExitStatus))
+      else
+        Log('[hook] done');
+    except
+      on E : Exception do
+        Log('[hook] cannot run ' + Cmd + ': ' + E.Message);
+    end;
+  finally
+    P.Free;
+    Parts.Free;
+    LeaveCriticalSection(FHookLock);
+  end;
 end;
 
 procedure TBinkMailer.InboundDone(Sender : TObject; Session : TBinkSession);
 begin
   SessRemove(Session);
-end;
-
-function Clean(const S : String) : String;
-var
-  I : Integer;
-begin
-  Result := S;
-
-  for I := 1 to Length(Result) do
-    if Result[I] in [#9, #10, #13] then
-      Result[I] := ' ';
 end;
 
 function TBinkMailer.FindLinkState(const Key : String) : TLinkState;
@@ -1193,6 +1362,11 @@ begin
   Describe;
 
   FInbound := TBinkInbound.Create(FSetup.Inbound);
+  FInboundUn := nil;
+
+  if FSetup.InboundUnsecure <> '' then
+    FInboundUn := TBinkInbound.Create(FSetup.InboundUnsecure);
+
   FBso := nil;
   FListener := nil;
   FListenThr := nil;
@@ -1223,6 +1397,7 @@ begin
     begin
       FListener := TBinkListener.Create(FSetup.SessionConfig(nil),
         FInbound, FSetup.Port, FSetup.Bind);
+      FListener.InboundUnsecure := FInboundUn;
       FListener.MaxSessions := FSetup.MaxSessions;
       FListener.OnLog := @EmitLog;
       FListener.OnSession := @NewSession;
@@ -1279,6 +1454,7 @@ begin
     FControl.Free;
     FBso.Free;
     FInbound.Free;
+    FInboundUn.Free;
   end;
 
   if FFatal then

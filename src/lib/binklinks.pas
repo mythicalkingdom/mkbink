@@ -18,6 +18,13 @@ unit BinkLinks;
       sysop    Sysop Name
       location Somewhere
       inbound  /var/spool/ftn/in
+      inbound-unsecure /var/spool/ftn/in-unsecure   files from callers that
+                                         did not use a password (default:
+                                         the same directory as inbound)
+      on-inbound /usr/bin/tosser         run (no shell) after every session that
+                                         received files; the files' full paths
+                                         are the arguments; see hook-timeout
+      hook-timeout 300                   seconds before the command is killed
       bso      /var/spool/ftn/out        BSO outbound base directory
       zone     1                         BSO default zone (default: that of
                                          the first address)
@@ -92,6 +99,9 @@ type
     Sysop         : String;
     Location      : String;
     Inbound       : String;
+    InboundUnsecure : String;      { '' = the same as Inbound }
+    OnInbound     : String;        { command run after a session that received files }
+    HookTimeout   : Integer;
     Bso           : String;
     Zone          : Integer;       { -1 = zone of the first address }
     Listen        : Boolean;
@@ -168,6 +178,7 @@ begin
   RetryMax := 3600;
   ScanInterval := 30;
   Inbound := 'inbound';
+  HookTimeout := 300;
 end;
 
 destructor TBinkSetup.Destroy;
@@ -503,6 +514,15 @@ begin
       Location := Val
     else if Key = 'inbound' then
       Inbound := Val
+    else if Key = 'inbound-unsecure' then
+      InboundUnsecure := Val
+    else if Key = 'on-inbound' then
+      OnInbound := Val
+    else if Key = 'hook-timeout' then
+    begin
+      if Num(1, 86400, V) then
+        HookTimeout := V;
+    end
     else if Key = 'bso' then
       Bso := Val
     else if Key = 'zone' then
