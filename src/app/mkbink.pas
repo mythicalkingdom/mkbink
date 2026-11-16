@@ -56,6 +56,7 @@ type
     QTarget   : String;
     Flavour   : Char;
     QDelete   : Boolean;
+    QTruncate : Boolean;
     QFiles    : TStringList;
   end;
 
@@ -119,7 +120,7 @@ begin
   Writeln('Usage:');
   Writeln('  mkbink poll <host[:port]> -a <our addr> [-r <remote addr>] [options]');
   Writeln('  mkbink listen -a <our addr> [options]');
-  Writeln('  mkbink queue -O <bso dir> -t <addr> [-F flavour] [-x] <file>...');
+  Writeln('  mkbink queue -O <bso dir> -t <addr> [-F flavour] [-x | -T] <file>...');
   Writeln('  mkbink run -f <settings file> [-S <socket>]');
   Writeln('                                     answer calls and call the links in the file;');
   Writeln('                                     -S: a Unix socket a monitor can connect to (see src/lib/binkcontrol.pas)');
@@ -161,6 +162,7 @@ begin
   Writeln('  -t ADDR   system to send the file(s) to');
   Writeln('  -F FLAV   flavour: I(mmediate) C(rash) D(irect) N(ormal, default) H(old)');
   Writeln('  -x        delete the file after it was sent (default: keep it)');
+  Writeln('  -T        truncate the file to 0 bytes after it was sent (BSO flow line #file)');
   Writeln;
   Writeln('Session:');
   Writeln('  -d DOMAIN network domain appended to our address, e.g. fidonet');
@@ -225,6 +227,7 @@ begin
   O.QTarget := '';
   O.Flavour := 'N';
   O.QDelete := False;
+  O.QTruncate := False;
   O.QFiles := TStringList.Create;
 
   if ParamCount < 1 then
@@ -373,6 +376,8 @@ begin
     end
     else if A = '-x' then
       O.QDelete := True
+    else if A = '-T' then
+      O.QTruncate := True
     else if A = '-k' then
       O.KillSent := True
     else if A = '-c' then
@@ -798,6 +803,8 @@ begin
   try
     if O.QDelete then
       Act := oaDelete
+    else if O.QTruncate then
+      Act := oaTruncate
     else
       Act := oaKeep;
 

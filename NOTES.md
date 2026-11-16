@@ -75,3 +75,5 @@ An alternative to BSO, chosen with `-M <netmail dir> -A <attach dir>` (instead o
 * Gaps: message text goes into the packet unchanged (INTL/FMPT/TOPT must already be in it, which MKMsgFid and `queue` do); `.msg` paths are limited to 110 characters by MKMsgFid; no routing (only messages addressed to the link itself).
 
 * mk-fpc's tosser (`mktoss`) is the `on-inbound` command when the sysop switches it on (mkbinkcfg writes the line); mklisten starts mkbink with `MK=<BBS config dir>` in its environment because the hook needs it.  Verified end to end by mk-fpc's `tests/tosshooktest.py`.
+
+* `mkbink queue -T` truncates the file after it was sent (flow line `#file`), `-x` deletes it (`^file`); mk-fpc's tosser uses both for file attach netmail.
