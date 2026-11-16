@@ -33,7 +33,8 @@ uses
   BinkInbound,
   BinkOutbound,
   BinkBso,
-  BinkCram;
+  BinkCram,
+  BinkCrypt;
 
 type
 
@@ -82,6 +83,8 @@ type
     FSock      : TBinkSocket;
     FOwnsSock  : Boolean;
     FInbound   : TBinkInbound;
+    FInboundUnsecure : TBinkInbound;
+    FReceived  : TStringList;
     FOutbound  : TBinkOutbound;
     FState     : TBinkState;
 
@@ -96,6 +99,10 @@ type
     FRemoteHash  : String;     { hash chosen from the remote's list }
 
     FRemoteNR    : Boolean;    { remote sent OPT NR: send files NR style }
+    FRemoteCrypt : Boolean;    { remote sent OPT CRYPT }
+    FCryptOffered : Boolean;   { we sent OPT CRYPT before M_PWD }
+    FCrypt       : Boolean;    { stream encryption is active }
+    FCryptPassword : String;
     FRemotePLZ   : Boolean;    { remote offered PLZ compression }
     FPlz         : Boolean;    { PLZ mode is active (both offered) }
     FPlzOff      : Boolean;    { switched off by NZ: never re-enable }
@@ -181,6 +188,7 @@ type
     procedure StartNextFile;
     function  BeginSend(T : TBinkTransfer; AllowNR : Boolean) : Boolean;
     procedure ParseOpts(const S : String);
+    procedure StartCrypt(const Password : String);
     procedure PrepareBso;
     procedure RejectBusy(const Msg : String);
     procedure DisablePlz;
@@ -197,6 +205,7 @@ type
     procedure DropTransfer(T : TBinkTransfer);
     procedure FinalizeSent(T : TBinkTransfer);
 
+    function  CurInbound : TBinkInbound;
     function  Execute(Originating : Boolean;
                 const Node : TBinkNodeInfo) : Boolean;
 
@@ -218,6 +227,14 @@ type
     { Where received files go.  nil = refuse (M_SKIP) everything. }
     property Inbound : TBinkInbound
       read FInbound write FInbound;
+
+    { Where files go when the remote did not authenticate with a password
+      (not Secure).  nil = the same directory as Inbound. }
+    property InboundUnsecure : TBinkInbound
+      read FInboundUnsecure write FInboundUnsecure;
+
+    { Full paths of the files received so far (complete ones only). }
+    property Received : TStringList read FReceived;
 
     { Files to send.  Read when the transfer stage starts. }
     property Outbound : TBinkOutbound
@@ -261,6 +278,7 @@ type
       read GetRemoteAddr;
     property RemoteAddresses : String read FRemoteStr;
     property Secure : Boolean read FSecure;
+    property Originating : Boolean read FOriginating;
     property LastError : String read FLastError;
     property RemoteBusy : Boolean read FRemoteBusy;
     property FilesSent : Integer read FFilesSent;
@@ -319,6 +337,7 @@ begin
   inherited Create;
 
   FConfig := AConfig;
+  FReceived := TStringList.Create;
 
   if FConfig.Timeout <= 0 then
     FConfig.Timeout := BINK_DEFAULT_TIMEOUT;
@@ -334,6 +353,7 @@ end;
 destructor TBinkSession.Destroy;
 begin
   Cleanup;
+  FReceived.Free;
 
   if FOwnsSock then
     FSock.Free;
@@ -591,6 +611,8 @@ var
 
       FRemoteNR := True;
     end
+    else if UpperCase(W) = 'CRYPT' then
+      FRemoteCrypt := True
     else if UpperCase(W) = 'PLZ' then
     begin
       FRemotePLZ := True;
@@ -617,6 +639,26 @@ begin
   end;
 
   Check;
+end;
+
+{ Switch the connection to CRYPT.  Called right after the M_OK has
+  been sent (answering) or received (originating); both are the last
+  plaintext frames.  The originator's outgoing stream is keyed with
+  the password, the answerer's with "-" then the password. }
+procedure TBinkSession.StartCrypt(const Password : String);
+var
+  A, B : TBinkCipher;
+begin
+  CipherInit(A, Password);
+  CipherInitDash(B, Password);
+
+  if FOriginating then
+    FSock.StartCrypt(A, B)
+  else
+    FSock.StartCrypt(B, A);
+
+  FCrypt := True;
+  Log('CRYPT encryption active');
 end;
 
 { NZ (FTS-1029): drop out of PLZ mode for the rest of the session. }
@@ -701,6 +743,13 @@ begin
       begin
         FSecure := FRemotePwd <> '-';
         Log('Password accepted (' + FrameDataAsString(F) + ')');
+
+        { a "non-secure" M_OK means the remote did not accept the
+          password, so it will not encrypt either }
+        if FCryptOffered and FRemoteCrypt and FSecure and
+           (LowerCase(Trim(FrameDataAsString(F))) = 'secure') then
+          StartCrypt(FCryptPassword);
+
         Exit;
       end;
       M_ERR : FailRemote('M_ERR', FrameDataAsString(F));
@@ -752,7 +801,10 @@ var
   Pwd, Expected : String;
   Known : Boolean;
   KnownCount : Integer;
+  UseCrypt : Boolean;
 begin
+  UseCrypt := False;
+
   if Length(FRemote) = 0 then
     AbortSession('Bad address: no valid address in M_ADR');
 
@@ -805,6 +857,7 @@ begin
       end;
 
       Log('CRAM-MD5 authentication');
+      UseCrypt := (not FConfig.NoCrypt) and FRemoteCrypt;
     end
     else
     begin
@@ -822,7 +875,14 @@ begin
     end;
 
     FSecure := True;
+
+    if UseCrypt then
+      SendCmd(M_NUL, 'OPT CRYPT');
+
     SendCmd(M_OK, 'secure');
+
+    if UseCrypt then
+      StartCrypt(Expected);
   end
   else
   begin
@@ -874,11 +934,16 @@ begin
   FRemoteChallenge := '';
   FRemoteHash := '';
   FRemoteNR := False;
+  FRemoteCrypt := False;
+  FCryptOffered := False;
+  FCrypt := False;
+  FCryptPassword := '';
   FRemotePLZ := False;
   FPlz := False;
   FPlzOff := False;
   FWireSent := 0;
   FFilesSent := 0;     FFilesReceived := 0;
+  FReceived.Clear;
   FBytesSent := 0;     FBytesReceived := 0;
   SetLength(FRemote, 0);
   FRemSys := ''; FRemSysop := ''; FRemLoc := ''; FRemVer := '';
@@ -922,6 +987,16 @@ begin
         begin
           FRemotePwd := Node.Password;
           Log('Remote offers no CRAM-MD5: sending password in cleartext');
+        end;
+
+        { CRYPT needs a real password and CRAM (so the password never
+          travels in clear); the answering side confirms before M_OK }
+        if (not FConfig.NoCrypt) and (Node.Password <> '') and
+           (FRemoteChallenge <> '') then
+        begin
+          FCryptOffered := True;
+          FCryptPassword := Node.Password;
+          SendCmd(M_NUL, 'OPT CRYPT');
         end;
 
         SendCmd(M_PWD, FRemotePwd);
@@ -1293,6 +1368,7 @@ var
   Have : Int64;
   T    : TBinkTransfer;
   Part : String;
+  EmptyPath : String;
 begin
   if FRxState = rxReceD then
     AbandonReceive;
@@ -1303,7 +1379,7 @@ begin
     AbortSession('M_FILE: cannot parse args');
 
   { Refuse (non destructively) anything we cannot or will not take }
-  if (FInbound = nil) or
+  if (CurInbound = nil) or
      (not TBinkInbound.IsSafeName(Info.FileName)) then
   begin
     Log('Refusing ' + Info.FileName);
@@ -1312,7 +1388,7 @@ begin
   end;
 
   { Already have this exact file: acknowledge so remote can drop it }
-  if FInbound.HasComplete(Info.FileName, Info.Size, Info.TimeStamp) then
+  if CurInbound.HasComplete(Info.FileName, Info.Size, Info.TimeStamp) then
   begin
     Log('Already have ' + Info.FileName + ', acknowledging');
     SendCmd(M_GOT, BuildGOT(Info));
@@ -1322,7 +1398,7 @@ begin
   if Info.Size = 0 then
   begin
     try
-      FInbound.StoreEmpty(Info.FileName, Info.TimeStamp);
+      EmptyPath := CurInbound.StoreEmpty(Info.FileName, Info.TimeStamp);
     except
       on E : Exception do
       begin
@@ -1333,18 +1409,19 @@ begin
     end;
 
     Inc(FFilesReceived);
+    FReceived.Add(EmptyPath);
     Log('Received ' + Info.FileName + ' (empty)');
     SendCmd(M_GOT, BuildGOT(Info));
     Exit;
   end;
 
-  Have := FInbound.PartialSize(
+  Have := CurInbound.PartialSize(
     Info.FileName, Info.Size, Info.TimeStamp);
 
   if Have >= Info.Size then
   begin
     { stale / oversized partial: start again }
-    FInbound.DiscardPartial(
+    CurInbound.DiscardPartial(
       Info.FileName, Info.Size, Info.TimeStamp);
     Have := 0;
   end;
@@ -1365,7 +1442,7 @@ begin
     Exit;
   end;
 
-  Part := FInbound.PartialPath(
+  Part := CurInbound.PartialPath(
     Info.FileName, Info.Size, Info.TimeStamp);
 
   T := TBinkTransfer.Create;
@@ -1421,6 +1498,14 @@ begin
     FinishReceive;
 end;
 
+function TBinkSession.CurInbound : TBinkInbound;
+begin
+  if (not FSecure) and (FInboundUnsecure <> nil) then
+    Result := FInboundUnsecure
+  else
+    Result := FInbound;
+end;
+
 procedure TBinkSession.FinishReceive;
 var
   T     : TBinkTransfer;
@@ -1432,7 +1517,7 @@ begin
   T.Close;
 
   try
-    Final := FInbound.Finalize(T.LocalPath, T.FileName, T.UnixTime);
+    Final := CurInbound.Finalize(T.LocalPath, T.FileName, T.UnixTime);
   except
     on E : Exception do
     begin
@@ -1443,6 +1528,7 @@ begin
   end;
 
   Inc(FFilesReceived);
+  FReceived.Add(Final);
   Log(Format('Received %s (%d bytes) -> %s',
     [T.FileName, T.FileSize, Final]));
 

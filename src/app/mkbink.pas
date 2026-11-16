@@ -157,6 +157,7 @@ begin
   Writeln('  -t SECS   inactivity timeout (default ', BINK_DEFAULT_TIMEOUT, ')');
   Writeln('  -c        listen: refuse cleartext passwords (require CRAM)');
   Writeln('  -z        offer PLZ dataframe compression (FTS-1029)');
+  Writeln('  -E        never use CRYPT (default: used when the remote offers it)');
   Writeln('  -N        ask the remote for non-reliable (NR) mode (FTS-1028);');
   Writeln('            only for links that keep dropping: it is slower');
   Writeln;
@@ -356,6 +357,8 @@ begin
       O.Config.NonReliable := True
     else if A = '-z' then
       O.Config.Compress := True
+    else if A = '-E' then
+      O.Config.NoCrypt := True
     else if (A <> '') and (A[1] <> '-') and (O.Mode = 'poll') and
             (O.Target = '') then
       O.Target := A

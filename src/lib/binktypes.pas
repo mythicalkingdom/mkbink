@@ -58,6 +58,7 @@ type
     RequireCram : Boolean; { answering side: refuse cleartext passwords }
     NonReliable : Boolean; { ask the remote for NR mode (FTS-1028) }
     Compress    : Boolean; { offer PLZ dataframe compression (FTS-1029) }
+    NoCrypt     : Boolean; { never use CRYPT (default: use it when offered) }
   end;
 
 function DefaultBinkConfig : TBinkConfig;

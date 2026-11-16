@@ -19,7 +19,8 @@ uses
   SysUtils,
   Sockets,
   BaseUnix,
-  NetDB;
+  NetDB,
+  BinkCrypt;
 
 type
   EBinkSocket = class(Exception);
@@ -36,6 +37,10 @@ type
     FClosed   : Boolean;
     FRemote   : String;
     FLastErr  : String;
+    FEnc      : TBinkCipher;
+    FDec      : TBinkCipher;
+    FEncOn    : Boolean;
+    FDecOn    : Boolean;
 
     procedure SetNonBlocking;
     procedure DoRead;
@@ -87,6 +92,11 @@ type
 
     procedure Consume(Len : Integer);
 
+    { CRYPT: everything queued by Send() from now on is encrypted with
+      Enc; everything received from now on (including bytes already
+      sitting unread in the input buffer) is decrypted with Dec. }
+    procedure StartCrypt(const Enc, Dec : TBinkCipher);
+
     property Available  : Integer read GetAvailable;
     property OutPending : Integer read GetOutPending;
     property Closed     : Boolean read FClosed;
@@ -97,6 +107,7 @@ type
 implementation
 
 const
+  FD_CLOEXEC = 1;
   IO_CHUNK = 65536;
 
 function MonoMs : QWord;
@@ -195,6 +206,7 @@ begin
   Addr.sin_addr   := ResolveIPv4(Host);
 
   FHandle := fpSocket(AF_INET, SOCK_STREAM, 0);
+  fpFcntl(FHandle, F_SETFD, FD_CLOEXEC);   { not inherited by a command we run }
 
   if FHandle < 0 then
     raise EBinkSocket.Create('socket() failed');
@@ -265,6 +277,7 @@ begin
     Addr.sin_addr := ResolveIPv4(BindAddr);
 
   FHandle := fpSocket(AF_INET, SOCK_STREAM, 0);
+  fpFcntl(FHandle, F_SETFD, FD_CLOEXEC);   { not inherited by a command we run }
 
   if FHandle < 0 then
     raise EBinkSocket.Create('socket() failed');
@@ -317,6 +330,7 @@ begin
 
   Len := SizeOf(Addr);
   H := fpAccept(FHandle, @Addr, @Len);
+  fpFcntl(H, F_SETFD, FD_CLOEXEC);   { not inherited by a command we run }
 
   if H < 0 then
     Exit;
@@ -368,6 +382,10 @@ begin
     SetLength(FOutBuf, (FOutLen + Len) * 2);
 
   Move(Buffer, FOutBuf[FOutLen], Len);
+
+  if FEncOn then
+    CipherEncrypt(FEnc, FOutBuf[FOutLen], Len);
+
   Inc(FOutLen, Len);
 
   if not FClosed then
@@ -393,7 +411,12 @@ begin
   R := fpRecv(FHandle, @FInBuf[FInLen], IO_CHUNK, 0);
 
   if R > 0 then
-    Inc(FInLen, R)
+  begin
+    if FDecOn then
+      CipherDecrypt(FDec, FInBuf[FInLen], R);
+
+    Inc(FInLen, R);
+  end
   else if R = 0 then
   begin
     FClosed := True;
@@ -532,6 +555,17 @@ begin
     FInPos := 0;
     FInLen := 0;
   end;
+end;
+
+procedure TBinkSocket.StartCrypt(const Enc, Dec : TBinkCipher);
+begin
+  FEnc := Enc;
+  FDec := Dec;
+  FEncOn := True;
+  FDecOn := True;
+
+  if FInLen > FInPos then
+    CipherDecrypt(FDec, FInBuf[FInPos], FInLen - FInPos);
 end;
 
 end.
