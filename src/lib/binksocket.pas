@@ -163,8 +163,10 @@ begin
 
   if ResolveHostByName(Host, H) then
   begin
-    { THostEntry.Addr is in host byte order }
-    Result.s_addr := htonl(H.Addr.s_addr);
+    { Despite what the FPC docs imply, ResolveHostByName returns the
+      address already in network byte order (localhost comes back as
+      $0100007F in memory, i.e. 127.0.0.1).  Do not swap it again. }
+    Result := H.Addr;
     if Result.s_addr <> 0 then
       Exit;
   end;
