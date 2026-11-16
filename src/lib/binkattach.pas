@@ -25,8 +25,9 @@ unit BinkAttach;
                   packet (<hex>.pkt, built in <attach>/packets/<link>/)
                   and the packet is sent.
 
-  Messages with the Crash flag go first.  Hold, direct and immediate
-  flavours do not exist here.  When a file or packet was acknowledged by
+  Order: Crash messages first, then normal ones, then Hold ones (Hold for
+  pickup flag), which are only sent when the remote called us.  Direct and
+  immediate flavours do not exist here.  When a file or packet was acknowledged by
   the remote, the message is marked Sent, or deleted if it has Kill/Sent.
   File requests (File Request flag) are not supported and stay untouched.
 
@@ -131,19 +132,18 @@ uses
   MKGlobT,
   MKMsgAbs,
   MKMsgFid,
-  BinkPacket,
+  MKMsgPkt,
   BinkUtil;
 
 const
   ATTR_PRIVATE = $0001;
   ATTR_CRASH   = $0002;
-  ATTR_HOLD    = $0200;
   ATTR_ATTACH  = $0010;
 
 type
   TCand = record
     Num    : LongInt;
-    Crash  : Boolean;
+    Rank   : Integer;       { 0 crash, 1 normal, 2 hold }
     Attach : Boolean;
     Subject : String;
     Size   : Int64;
@@ -350,13 +350,14 @@ var
   Act   : TBinkOutAction;
   Item  : TBinkOutItem;
   Job   : TAttachJob;
-  W     : TBinkPacketWriter;
-  PktPath, Text : String;
+  P     : PktMsgObj;
+  PA, PD : AddrType;
+  Res   : Word;
+  PktPath, FromName, ToName : String;
   C     : Char;
   Org   : AddrType;
   SR    : TSearchRec;
   NonAttach : Integer;
-  Crash : Boolean;
 begin
   Count := 0;
   Bytes := 0;
@@ -389,11 +390,17 @@ begin
            (not M.IsSent) and
            (not M.IsFileReq) and
            (not M.IsDeleted) and
-           (IncludeHold or ((Attr and ATTR_HOLD) = 0)) then
+           (IncludeHold or (not M.IsHold)) then
         begin
           SetLength(Cands, NC + 1);
           Cands[NC].Num     := M.GetMsgNum;
-          Cands[NC].Crash   := M.IsCrash;
+          if M.IsHold then
+            Cands[NC].Rank := 2
+          else if M.IsCrash then
+            Cands[NC].Rank := 0
+          else
+            Cands[NC].Rank := 1;
+
           Cands[NC].Attach  := M.IsFAttach;
           Cands[NC].Subject := Trim(M.GetSubj);
           Cands[NC].Size    := FileSizeOf(MsgPath(M.GetMsgNum));
@@ -418,14 +425,13 @@ begin
       end;
 
       { pass 2: crash first, then normal; files before the packet }
-      for Flav := 0 to 1 do
+      for Flav := 0 to 2 do
       begin
-        Crash := Flav = 0;
         NonAttach := 0;
 
         for I := 0 to NC - 1 do
         begin
-          if Cands[I].Crash <> Crash then
+          if Cands[I].Rank <> Flav then
             Continue;
 
           if Cands[I].Attach then
@@ -472,11 +478,17 @@ begin
 
         Job := TAttachJob.Create;
         Job.Addr := A;
-        W := TBinkPacketWriter.Create(PktPath, FOrigin, A);
+        PA := ToAddr(FOrigin);
+        PD := ToAddr(A);
+        P.Init;
         try
+          P.SetMsgPath(PktPath);
+          P.SetMailType(mmtNetMail);
+          P.SetPacketInfo(PA, PD, '');
+
           for I := 0 to NC - 1 do
           begin
-            if (Cands[I].Crash <> Crash) or Cands[I].Attach then
+            if (Cands[I].Rank <> Flav) or Cands[I].Attach then
               Continue;
 
             M.SetMsgLoc(Cands[I].Num);
@@ -484,9 +496,31 @@ begin
             M.GetOrig(Org);
             M.GetDest(Dst);
             Attr := M.BufferWord(186);
+            FromName := M.GetFrom;
+            ToName := M.GetTo;
 
+            { the packet unit insists on a sender and a recipient }
+            if FromName = '' then
+              FromName := 'Unknown';
+
+            if ToName = '' then
+              ToName := 'Sysop';
+
+            P.StartNewMsg;
+            P.SetFrom(FromName);
+            P.SetTo(ToName);
+            P.SetSubj(M.GetSubj);
+            P.SetDest(Dst);
+            P.SetOrig(Org);
+            P.SetCost(M.GetCost);
+            P.SetDate(M.GetDate);
+            P.SetTime(M.GetTime);
+            P.SetPriv((Attr and ATTR_PRIVATE) <> 0);
+            P.SetCrash((Attr and ATTR_CRASH) <> 0);
+
+            { the text goes over unchanged (kludge lines too; the packet
+              unit rebuilds INTL, FMPT and TOPT itself) }
             M.MsgTxtStartUp;
-            Text := '';
 
             repeat
               C := M.GetChar;
@@ -494,23 +528,33 @@ begin
               if (C = #0) or M.EOM then
                 Break;
 
-              Text := Text + C;
+              P.DoChar(C);
             until False;
 
-            W.AddMessage(
-              M.GetFrom, M.GetTo, M.GetSubj,
-              M.BufferNullString(144, 19),
-              FromAddr(Org), FromAddr(Dst),
-              Attr and (ATTR_PRIVATE or ATTR_CRASH), M.GetCost,
-              Text);
+            Res := P.WriteMsg;
+
+            if Res <> 0 then
+            begin
+              Dest.Notes.Add(Format(
+                'Netmail %d for %s not packed (MKMsgPkt error %d); it stays in the netmail directory',
+                [Cands[I].Num, AddressToString(A), Res]));
+              Continue;
+            end;
 
             J := Length(Job.Msgs);
             SetLength(Job.Msgs, J + 1);
             Job.Msgs[J] := Cands[I].Num;
           end;
         finally
-          W.Close;
-          W.Free;
+          P.Done;
+        end;
+
+        if Length(Job.Msgs) = 0 then
+        begin
+          Job.Free;
+          DeleteFile(PktPath);
+          Dec(Count);
+          Continue;
         end;
 
         FJobs.Add(Job);
@@ -609,7 +653,7 @@ function TBinkAttachSpool.Attach(
   Action : TBinkOutAction) : String;
 var
   M : FidoMsgObj;
-  Crash : Boolean;
+  Crash, Hold : Boolean;
   Dir, Dest, Prefix : String;
   Dst, Org : AddrType;
   T : TDateTime;
@@ -619,12 +663,15 @@ var
 begin
   Flavour := UpCase(Flavour);
 
+  Hold := False;
+
   case Flavour of
     'I', 'C' : Crash := True;
     'D', 'N' : Crash := False;
+    'H'      : begin Crash := False; Hold := True; end;
   else
     raise EBinkError.CreateFmt(
-      'Flavour %s is not available in attach style (use C or N)',
+      'Flavour %s is not available in attach style (use C, N or H)',
       [Flavour]);
   end;
 
@@ -697,6 +744,7 @@ begin
       M.SetPriv(True);
       M.SetFAttach(True);
       M.SetCrash(Crash);
+      M.SetHold(Hold);
       M.SetKillSent(Action = oaDelete);
       M.DoStringLn('File attached by mkbink');
 

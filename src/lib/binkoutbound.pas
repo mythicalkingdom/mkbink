@@ -46,6 +46,7 @@ type
   private
     FItems    : TFPList;
     FKillSent : Boolean;
+    FNotes    : TStringList;
 
     function  GetCount : Integer;
     function  GetItem(Index : Integer) : TBinkOutItem;
@@ -75,6 +76,10 @@ type
     property Count : Integer read GetCount;
     property Items[Index : Integer] : TBinkOutItem read GetItem;
 
+    { Problems a spool met while collecting (an item it had to skip); the
+      session logs them.  Cleared by Clear. }
+    property Notes : TStringList read FNotes;
+
     property KillSent : Boolean
       read FKillSent
       write FKillSent;
@@ -93,6 +98,7 @@ constructor TBinkOutbound.Create;
 begin
   inherited Create;
   FItems := TFPList.Create;
+  FNotes := TStringList.Create;
   FKillSent := False;
 end;
 
@@ -100,6 +106,7 @@ destructor TBinkOutbound.Destroy;
 begin
   Clear;
   FItems.Free;
+  FNotes.Free;
   inherited Destroy;
 end;
 
@@ -121,6 +128,7 @@ begin
     TObject(FItems[I]).Free;
 
   FItems.Clear;
+  FNotes.Clear;
 end;
 
 function TBinkOutbound.AddItem(

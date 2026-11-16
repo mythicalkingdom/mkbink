@@ -1141,6 +1141,11 @@ begin
 
     N := FBso.Collect(FRemote[I], not FOriginating, FBsoOut);
     Inc(Total, N);
+
+    for N := 0 to FBsoOut.Notes.Count - 1 do
+      Log('Outbound: ' + FBsoOut.Notes[N]);
+
+    FBsoOut.Notes.Clear;
   end;
 
   Log(Format('%d file(s) found in the BSO outbound', [Total]));

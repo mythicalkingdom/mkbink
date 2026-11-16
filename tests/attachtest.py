@@ -254,6 +254,7 @@ def main():
               m.get('text', '').startswith('\x01INTL 2:2/2 1:1/1\r') and 'normal mail' in m.get('text', ''), m)
         check('only private/crash attribute bits go out', m.get('attr') == ATTR_PRIVATE and
               crash['msgs'][0]['attr'] == ATTR_PRIVATE | ATTR_CRASH, (m.get('attr'), crash['msgs'][0]['attr']))
+        check('a MSGID was added', '\x01MSGID: 1:1/1 ' in m.get('text', ''), m.get('text'))
         check('date kept', m.get('date', b'')[:19] == b'16 Nov 26  12:00:00')
     else:
         check('two packets arrived', False, order)
@@ -291,11 +292,43 @@ def main():
         check('subject names a copy in <attach>/<link>/', m['subj'] == os.path.join(att, '2.2.2.0', 'queued.txt'), m['subj'])
     else:
         check('queue printed the message path', False, r.stdout)
-    r = subprocess.run([exe, 'queue', '-M', net, '-A', att, '-a', '1:1/1', '-t', '2:2/2', '-F', 'H', q],
+    hq = os.path.join(work, 'held.txt')
+    open(hq, 'w').write('held file\n')
+    r = subprocess.run([exe, 'queue', '-M', net, '-A', att, '-a', '1:1/1', '-t', '2:2/2', '-F', 'H', hq],
                        capture_output=True, text=True)
-    check('hold flavour is refused', r.returncode != 0 and 'attach style' in (r.stdout + r.stderr))
+    hp = [l.split('-> ')[-1].strip() for l in r.stdout.splitlines() if '->' in l]
+    hm = read_msg(hp[0]) if hp and os.path.exists(hp[0]) else {}
+    check('queue -F H sets Hold (0x0200) and not Crash', r.returncode == 0 and hm.get('attr', 0) & ATTR_HOLD and
+          not hm.get('attr', 0) & ATTR_CRASH, (r.stdout + r.stderr, hm))
+    r = subprocess.run([exe, 'queue', '-M', net, '-A', att, '-a', '1:1/1', '-t', '2:2/2', '-F', 'X', q],
+                       capture_output=True, text=True)
+    check('an unknown flavour is refused', r.returncode != 0 and 'lavour' in (r.stdout + r.stderr))
     r, store, order = run_peer_and_poll(srv, port, '-M', net, '-A', att)
-    check('queued file is sent', order == ['queued.txt'] and store.get('queued.txt') == b'queued file\n', (order, r.stdout[-500:]))
+    check('queued file is sent, the held one is not (we called)', order == ['queued.txt'] and store.get('queued.txt') == b'queued file\n', (order, r.stdout[-500:]))
+
+    # hold mail goes out only when the remote calls us: mkbink answers, a second mkbink polls it
+    net3, att3 = os.path.join(work, 'netmail3'), os.path.join(work, 'attach3')
+    write_msg(net3, 1, (1, 1, 1, 0), 'Held mail', 'wait for pickup\r', ATTR_PRIVATE | ATTR_HOLD | ATTR_LOCAL, frm_addr=(2, 2, 2, 0))
+    write_msg(net3, 2, (1, 1, 1, 0), 'Plain mail', 'normal\r', ATTR_PRIVATE | ATTR_LOCAL, frm_addr=(2, 2, 2, 0))
+    lp = 24613
+    inb = os.path.join(work, 'in3')
+    ln = subprocess.Popen([exe, 'listen', '-a', '2:2/2', '-r', '1:1/1', '-P', 'pw', '-p', str(lp), '-b', '127.0.0.1',
+                           '-i', os.path.join(work, 'in4'), '-M', net3, '-A', att3, '-Z', '2'],
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    time.sleep(1)
+    try:
+        r = subprocess.run([exe, 'poll', '127.0.0.1:%d' % lp, '-a', '1:1/1', '-r', '2:2/2', '-P', 'pw', '-i', inb,
+                            '-o', os.path.join(work, 'nothing')], capture_output=True, text=True, timeout=60)
+    finally:
+        ln.terminate()
+        ln.wait(10)
+    got = sorted(os.listdir(inb)) if os.path.isdir(inb) else []
+    check('caller receives both packets (normal first, hold last)', r.returncode == 0 and len(got) == 2, (got, r.stdout[-600:]))
+    subs = []
+    for f in sorted(got, key=lambda n: os.path.getmtime(os.path.join(inb, n))):
+        subs.append([m['subj'] for m in parse_pkt(open(os.path.join(inb, f), 'rb').read())['msgs']])
+    check('held message went out in its own packet after the normal one', subs == [['Plain mail'], ['Held mail']], subs)
+    check('both marked Sent', (read_attr(net3, 1) or 0) & ATTR_SENT and (read_attr(net3, 2) or 0) & ATTR_SENT)
 
     # run mode: settings file with netmail/attach instead of bso
     net2, att2 = os.path.join(work, 'netmail2'), os.path.join(work, 'attach2')
