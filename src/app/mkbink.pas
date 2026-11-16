@@ -21,7 +21,11 @@ uses
   BinkNode,
   BinkInbound,
   BinkOutbound,
+  BinkSpool,
   BinkBso,
+  {$IFDEF MKMSG}
+  BinkAttach,
+  {$ENDIF}
   BinkSession,
   BinkListener,
   BinkLinks,
@@ -42,6 +46,8 @@ type
     OutDir    : String;      { flat outbound directory }
     OutDirSet : Boolean;
     BsoDir    : String;      { BSO outbound base directory }
+    MsgDir    : String;      { attach style: netmail *.msg directory }
+    AttachDir : String;      { attach style: attached files, packets }
     DefZone   : Integer;     { BSO default zone, -1 = not given }
     HaveAddr  : Boolean;
     KillSent  : Boolean;
@@ -60,7 +66,7 @@ type
   TServerHooks = class
   public
     Opts    : POptions;
-    Bso     : TBinkBso;
+    Bso     : TBinkSpool;
     Allowed : array of TFTNAddress;
 
     function  Auth(const Remote : TFTNAddress;
@@ -138,6 +144,12 @@ begin
   Writeln('  -O DIR    BSO outbound base directory.  Mail queued there for the');
   Writeln('            remote system is sent; hold flavour only when it calls us');
   Writeln('  -Z ZONE   the BSO default zone (default: the zone of -a)');
+  Writeln('  -M DIR    attach (FrontDoor) style instead of -O: the directory of');
+  Writeln('            netmail *.msg files.  Needs -A.  Messages for the remote are');
+  Writeln('            sent (crash first); File Attach messages send their file');
+  Writeln('  -A DIR    attach style: where attached files and the packets built');
+  Writeln('            from netmail live.  (-Z is the zone for messages without one;');
+  Writeln('            queue needs -a.  Built only when the MKMsg units were found)');
   Writeln('  -o DIR    plain outbound directory (default ./outbound if no -O)');
   Writeln('              poll:   files directly in DIR are sent');
   Writeln('              listen: files in DIR/<zone>.<net>.<node>.<point>/');
@@ -197,6 +209,8 @@ begin
   O.OutDir := 'outbound';
   O.OutDirSet := False;
   O.BsoDir := '';
+  O.MsgDir := '';
+  O.AttachDir := '';
   O.DefZone := -1;
   O.HaveAddr := False;
   O.Password := GetEnvironmentVariable('BINK_PASSWORD');
@@ -303,6 +317,16 @@ begin
       Inc(I);
       O.BsoDir := NeedArg(I, A);
     end
+    else if A = '-M' then
+    begin
+      Inc(I);
+      O.MsgDir := NeedArg(I, A);
+    end
+    else if A = '-A' then
+    begin
+      Inc(I);
+      O.AttachDir := NeedArg(I, A);
+    end
     else if A = '-Z' then
     begin
       Inc(I);
@@ -381,10 +405,25 @@ begin
     Exit;
   end;
 
+  if (O.MsgDir <> '') or (O.AttachDir <> '') then
+  begin
+    {$IFNDEF MKMSG}
+    Die('This build has no attach style support (it needs the MKMsg ' +
+        'units: see the Makefile, variable MKMSG)');
+    {$ENDIF}
+    if (O.MsgDir = '') or (O.AttachDir = '') then
+      Die('Attach style needs both -M <netmail directory> and ' +
+          '-A <attach directory>');
+    if O.BsoDir <> '' then
+      Die('Use either -O (BSO) or -M/-A (attach style), not both');
+  end;
+
   if O.Mode = 'queue' then
   begin
-    if O.BsoDir = '' then
-      Die('queue needs -O <bso outbound directory>');
+    if (O.BsoDir = '') and (O.MsgDir = '') then
+      Die('queue needs -O <bso outbound directory> or -M/-A');
+    if (O.MsgDir <> '') and (not O.HaveAddr) then
+      Die('queue in attach style needs our address (-a)');
     if O.QTarget = '' then
       Die('queue needs -t <address>');
     if O.QFiles.Count = 0 then
@@ -420,8 +459,14 @@ begin
 end;
 
 { BSO default zone: -Z, else the zone of our own address. }
+{ A BSO or an attach style spool is in use. }
+function UseSpool(const O : TOptions) : Boolean;
+begin
+  Result := (O.BsoDir <> '') or (O.MsgDir <> '');
+end;
+
 function MakeBso(const O : TOptions;
-  const Fallback : TFTNAddress) : TBinkBso;
+  const Fallback : TFTNAddress) : TBinkSpool;
 var
   Z : Integer;
 begin
@@ -435,6 +480,15 @@ begin
       Z := Fallback.Zone;
   end;
 
+  {$IFDEF MKMSG}
+  if O.MsgDir <> '' then
+  begin
+    Result := TBinkAttachSpool.Create(
+      O.MsgDir, O.AttachDir, Z, O.Config.Address);
+    Exit;
+  end;
+  {$ENDIF}
+
   Result := TBinkBso.Create(O.BsoDir, Z);
 end;
 
@@ -442,7 +496,7 @@ end;
   no BSO spool. }
 function UseFlat(const O : TOptions) : Boolean;
 begin
-  Result := O.OutDirSet or (O.BsoDir = '');
+  Result := O.OutDirSet or (not UseSpool(O));
 end;
 
 { ---------------------------------------------------------------- }
@@ -518,7 +572,7 @@ var
   Outb : TBinkOutbound;
   Inb  : TBinkInbound;
   Lg   : TLog;
-  Bso  : TBinkBso;
+  Bso  : TBinkSpool;
 begin
   Node := Default(TBinkNodeInfo);
 
@@ -551,7 +605,7 @@ begin
     if UseFlat(O) then
       Outb.Scan(O.OutDir);
 
-    if O.BsoDir <> '' then
+    if UseSpool(O) then
     begin
       Bso := MakeBso(O, Node.Address);
       Sess.Bso := Bso;
@@ -590,7 +644,7 @@ begin
   try
     Hooks.Opts := @O;
 
-    if O.BsoDir <> '' then
+    if UseSpool(O) then
     begin
       Dummy := Default(TFTNAddress);
       Hooks.Bso := MakeBso(O, Dummy);
@@ -707,7 +761,11 @@ begin
     for I := 0 to High(S.Addresses) do
       Writeln('address ', AddressToString(S.Addresses[I]));
 
-    Writeln('inbound ', S.Inbound, '   bso ', S.Bso, '   zone ', S.BsoZone);
+    if S.Netmail <> '' then
+      Writeln('inbound ', S.Inbound, '   netmail ', S.Netmail, '   attach ',
+        S.AttachDir, '   zone ', S.BsoZone)
+    else
+      Writeln('inbound ', S.Inbound, '   bso ', S.Bso, '   zone ', S.BsoZone);
     Writeln('listen ', BoolToStr(S.Listen, 'yes', 'no'), '   port ', S.Port,
       '   bind ', S.Bind);
 
@@ -730,7 +788,7 @@ end;
 function DoQueue(var O : TOptions) : Integer;
 var
   Target : TFTNAddress;
-  Bso    : TBinkBso;
+  Bso    : TBinkSpool;
   I      : Integer;
   Flow   : String;
   Act    : TBinkOutAction;

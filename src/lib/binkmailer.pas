@@ -29,7 +29,11 @@ uses
   BinkListener,
   BinkInbound,
   Process,
+  BinkSpool,
   BinkBso,
+  {$IFDEF MKMSG}
+  BinkAttach,
+  {$ENDIF}
   BinkControl;
 
 type
@@ -77,7 +81,7 @@ type
   public
     constructor Create(AState : TLinkState; const ACfg : TBinkConfig;
       const ANode : TBinkNodeInfo; const AInboundPath, AUnsecurePath : String;
-      ABso : TBinkBso; ALog : TBinkLogEvent; AOnEnded : TSessionEnded);
+      ABso : TBinkSpool; ALog : TBinkLogEvent; AOnEnded : TSessionEnded);
     destructor Destroy; override;
     procedure Cancel;
     property Session : TBinkSession read FSession;
@@ -105,7 +109,7 @@ type
     FLock      : TRTLCriticalSection;
     FStop      : Boolean;
     FReload    : Boolean;
-    FBso       : TBinkBso;
+    FBso       : TBinkSpool;
     FInbound   : TBinkInbound;
     FInboundUn : TBinkInbound;
     FHookLock  : TRTLCriticalSection;
@@ -248,7 +252,7 @@ end;
 
 constructor TPollThread.Create(AState : TLinkState; const ACfg : TBinkConfig;
   const ANode : TBinkNodeInfo; const AInboundPath, AUnsecurePath : String;
-  ABso : TBinkBso; ALog : TBinkLogEvent; AOnEnded : TSessionEnded);
+  ABso : TBinkSpool; ALog : TBinkLogEvent; AOnEnded : TSessionEnded);
 begin
   inherited Create(True);
   FreeOnTerminate := False;
@@ -452,7 +456,7 @@ begin
     Result := Result + FmtAddr(S.Addresses[I]) + ' ';
 
   Result := Result + Format('|%s|%s|%s|%s|%s|%s|%d|%s|%d|%s|%d|%d|%d|%s|%s',
-    [S.Domain, S.SysName, S.Sysop, S.Location, S.Inbound + '>' + S.InboundUnsecure, S.Bso, S.Zone,
+    [S.Domain, S.SysName, S.Sysop, S.Location, S.Inbound + '>' + S.InboundUnsecure, S.Bso + '>' + S.Netmail + '>' + S.AttachDir, S.Zone,
      BoolToStr(S.Listen, True), S.Port, S.Bind, S.MaxSessions, S.MaxPolls,
      S.Timeout, BoolToStr(S.RequireCram, True),
      BoolToStr(S.Plz, True) + BoolToStr(S.Nr, True)]);
@@ -470,8 +474,13 @@ begin
     S := S + ' ' + FmtAddr(FSetup.Addresses[I]);
 
   Log('Our address(es):' + S);
-  Log('Inbound: ' + FSetup.Inbound + '   BSO outbound: ' +
-    FSetup.Bso + '   default zone ' + IntToStr(FSetup.BsoZone));
+  if FSetup.Netmail <> '' then
+    Log('Inbound: ' + FSetup.Inbound + '   attach style outbound: netmail ' +
+      FSetup.Netmail + ', attach ' + FSetup.AttachDir +
+      '   default zone ' + IntToStr(FSetup.BsoZone))
+  else
+    Log('Inbound: ' + FSetup.Inbound + '   BSO outbound: ' +
+      FSetup.Bso + '   default zone ' + IntToStr(FSetup.BsoZone));
 
   if FSetup.InboundUnsecure <> '' then
     Log('Inbound without password: ' + FSetup.InboundUnsecure);
@@ -1388,7 +1397,17 @@ begin
       end;
     end;
 
-    if FSetup.Bso <> '' then
+    if FSetup.Netmail <> '' then
+    begin
+      {$IFDEF MKMSG}
+      FBso := TBinkAttachSpool.Create(FSetup.Netmail, FSetup.AttachDir,
+        FSetup.BsoZone, FSetup.Addresses[0]);
+      {$ELSE}
+      Log('ERROR: this build has no attach style support (it needs the ' +
+        'MKMsg units): nothing can be sent');
+      {$ENDIF}
+    end
+    else if FSetup.Bso <> '' then
       FBso := TBinkBso.Create(FSetup.Bso, FSetup.BsoZone)
     else
       Log('WARNING: no "bso" directory: nothing can be sent');

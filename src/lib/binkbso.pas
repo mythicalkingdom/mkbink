@@ -38,10 +38,11 @@ uses
   SysUtils,
   BinkTypes,
   BinkNode,
-  BinkOutbound;
+  BinkOutbound,
+  BinkSpool;
 
 type
-  TBinkBso = class
+  TBinkBso = class(TBinkSpool)
   private
     FBase        : String;
     FDefaultZone : Word;
@@ -61,8 +62,8 @@ type
     { .bsy flag for A.  TryLock fails if another session (or process)
       holds it; a flag left by a dead process, or older than 12 hours,
       is stale and is taken over. }
-    function  TryLock(const A : TFTNAddress) : Boolean;
-    procedure Unlock(const A : TFTNAddress);
+    function  TryLock(const A : TFTNAddress) : Boolean; override;
+    procedure Unlock(const A : TFTNAddress); override;
 
     { Adds everything queued for A to Dest, most urgent flavour
       first.  Hold is only included when IncludeHold is set (they
@@ -70,18 +71,18 @@ type
     function Collect(
       const A : TFTNAddress;
       IncludeHold : Boolean;
-      Dest : TBinkOutbound) : Integer;
+      Dest : TBinkOutbound) : Integer; override;
 
     { How many items Collect would find for A (nothing is changed). }
     function Pending(
       const A : TFTNAddress;
-      IncludeHold : Boolean) : Integer;
+      IncludeHold : Boolean) : Integer; override;
 
     { Like Pending, and the size of the files in Bytes. }
     function PendingInfo(
       const A : TFTNAddress;
       IncludeHold : Boolean;
-      out Bytes : Int64) : Integer;
+      out Bytes : Int64) : Integer; override;
 
     { Queues FileName for A: appends it to the flow file of the given
       flavour (I, C, D, N or H).  Returns the flow file's path. }
@@ -89,7 +90,7 @@ type
       const A : TFTNAddress;
       const FileName : String;
       Flavour : Char;
-      Action : TBinkOutAction) : String;
+      Action : TBinkOutAction) : String; override;
 
     property Base : String read FBase;
     property DefaultZone : Word read FDefaultZone;
@@ -151,89 +152,8 @@ end;
 { ------------------------------------------------------------------ }
 
 function TBinkBso.TryLock(const A : TFTNAddress) : Boolean;
-var
-  Path : String;
-  Attempt : Integer;
-  {$IFDEF UNIX}
-  Fd, Err : cint;
-  Pid : String;
-  PidNum : LongInt;
-  SL : TStringList;
-  {$ENDIF}
-  Age : Int64;
 begin
-  Result := False;
-
-  Path := LinkDir(A) + PathDelim + LinkStem(A) + '.bsy';
-
-  { Only report "busy" when the flag really exists.  A missing or
-    unwritable outbound is a configuration problem and is raised. }
-  if not ForceDirectories(ExtractFilePath(Path)) then
-    raise EBinkError.CreateFmt(
-      'Cannot create the outbound directory %s', [ExtractFilePath(Path)]);
-
-  for Attempt := 1 to 2 do
-  begin
-    {$IFDEF UNIX}
-    Fd := fpOpen(Path, O_WRONLY or O_CREAT or O_EXCL, &666);
-
-    if Fd >= 0 then
-    begin
-      Pid := IntToStr(fpGetPid) + LineEnding;
-      fpWrite(Fd, Pid[1], Length(Pid));
-      fpClose(Fd);
-      Exit(True);
-    end;
-
-    Err := fpGetErrno;
-
-    if Err <> ESysEEXIST then
-      raise EBinkError.CreateFmt(
-        'Cannot create lock file %s: %s', [Path, SysErrorMessage(Err)]);
-    {$ELSE}
-    if not FileExists(Path) then
-    begin
-      with TFileStream.Create(Path, fmCreate) do Free;
-      Exit(True);
-    end;
-    {$ENDIF}
-
-    { exists: is it stale? }
-    if not FileExists(Path) then
-      Continue;
-
-    Age := DateTimeToUnix(Now) - GetFileUnixTime(Path);
-
-    if Age > STALE_LOCK_SECONDS then
-    begin
-      DeleteFile(Path);
-      Continue;
-    end;
-
-    {$IFDEF UNIX}
-    SL := TStringList.Create;
-    try
-      try
-        SL.LoadFromFile(Path);
-        PidNum := StrToIntDef(Trim(SL.Text), 0);
-      except
-        PidNum := 0;
-      end;
-    finally
-      SL.Free;
-    end;
-
-    { owner process is gone: take the flag over }
-    if (PidNum > 0) and (fpKill(PidNum, 0) <> 0) and
-       (fpGetErrno = ESysESRCH) then
-    begin
-      DeleteFile(Path);
-      Continue;
-    end;
-    {$ENDIF}
-
-    Exit(False);
-  end;
+  Result := TryLockFile(LinkDir(A) + PathDelim + LinkStem(A) + '.bsy');
 end;
 
 procedure TBinkBso.Unlock(const A : TFTNAddress);

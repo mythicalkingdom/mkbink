@@ -26,6 +26,9 @@ type
   TBinkOutAction = (oaMove, oaDelete, oaTruncate, oaKeep);
 
   TBinkOutbound = class;
+  TBinkOutItem  = class;
+
+  TBinkItemSent = procedure(Item : TBinkOutItem) of object;
 
   TBinkOutItem = class
   public
@@ -35,6 +38,8 @@ type
     FlowFile  : String;   { BSO flow file this came from, or '' }
     FlowLine  : String;   { the original (trimmed) line in FlowFile }
     Owner     : TBinkOutbound;
+    OnSent    : TBinkItemSent; { called after MarkSent did its work }
+    Ref       : TObject;       { for the spool that made the item }
   end;
 
   TBinkOutbound = class
@@ -280,6 +285,9 @@ begin
 
   if Item.FlowFile <> '' then
     MarkFlowLine(Item);
+
+  if Assigned(Item.OnSent) then
+    Item.OnSent(Item);
 end;
 
 end.

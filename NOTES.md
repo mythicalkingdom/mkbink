@@ -60,3 +60,17 @@ Later: tosser, netmail, file requests (config gives a "file request user" a leve
 
 Info-ZIP stream cipher as used by binkd and Synchronet.  Used automatically when the remote offers it, CRAM-MD5 was used, the password is real and the remote's `M_OK` says `secure` (a `non-secure` M_OK means the remote will not encrypt).  The originator sends `OPT CRYPT` before `M_PWD`; the answerer confirms with `OPT CRYPT` before `M_OK`.  `M_PWD` and `M_OK` are plaintext, everything after is encrypted, including frame headers.  Keys come from the password: originator->answerer stream = init(pw); answerer->originator = init("-") then pw bytes.
 Verified: cipher matches an independent C implementation; real binkd 1.1a (poll + 3 MB send); Synchronet 3.19b (handshake and clean session end, no files moved); mkbink<->mkbink both directions.  Weak cipher: prefer TLS for real privacy.
+
+## Attach (FrontDoor) style outbound (src/lib/binkattach.pas, binkpacket.pas, binkspool.pas)
+
+An alternative to BSO, chosen with `-M <netmail dir> -A <attach dir>` (instead of `-O`) or `netmail`/`attach` instead of `bso` in the settings file.  Never run both styles on the same files.  `TBinkSpool` (binkspool.pas) is the neutral base class the session/mailer use; `TBinkBso` and `TBinkAttachSpool` implement it.  Items report completion through `TBinkOutItem.OnSent`/`Ref`.
+
+* Mail = FTS-0001 `*.msg` files in the netmail directory, read and updated with `MKMsgFid` from the MK BBS (`../mk-fpc/src`, or `make MKMSG=dir`; without the units mkbink builds without this style and says so).  The units are not thread safe: all use is serialised in the spool.  `MKMsgPkt` is only a skeleton (reads nothing, writes nothing), so packets are written by `binkpacket.pas` (type 2+ header, FSC-0048).
+* A message goes to a link when its destination is the link, it is not marked Sent, not a file request, and not Hold (hold only when the remote called us).  Crash first.
+* **File Attach** message: only the file is sent, named by the subject: `^file` delete after, `#file` truncate, bare name looked up in `<attach>/<zone.net.node.point>/` then `<attach>/`.  **Other netmail**: all messages for the link and flavour go into one packet `<hex>.pkt` built in `<attach>/packets/<link>/` (leftovers of an interrupted session are swept on the next call).  Only the Private and Crash attribute bits go into the packet.
+* After M_GOT: the message is marked Sent, or deleted if it has Kill/Sent.
+* Lock: `<attach>/<link>.bsy` (same stale rules as BSO) plus an in-process set.
+* `mkbink queue -M -A -a <us> -t <addr> [-F C|N] [-x] file` copies the file to `<attach>/<link>/` (moves it with -x, which also sets ^ and Kill/Sent) and writes a File Attach message (local, private, crash for C/I).  Flavour H/D are not available.
+* Not verified against a real FrontDoor spool (none available): the attach-file naming is our own scheme, and FrontDoor's own flags (hold/direct bits are only read as Hold) were not checked.  `tests/attachtest.py` writes the `*.msg` files and parses the packets independently (python), including `run -f` mode.
+* Gaps: message text goes into the packet unchanged (INTL/FMPT/TOPT must already be in it, which MKMsgFid and `queue` do); `.msg` paths are limited to 110 characters by MKMsgFid; no routing (only messages addressed to the link itself).
+

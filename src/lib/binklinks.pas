@@ -28,6 +28,11 @@ unit BinkLinks;
       bso      /var/spool/ftn/out        BSO outbound base directory
       zone     1                         BSO default zone (default: that of
                                          the first address)
+      netmail  /var/spool/ftn/netmail    attach (FrontDoor) style outbound
+      attach   /var/spool/ftn/attach     instead of "bso": the *.msg directory
+                                         and where attached files and packets
+                                         live (both needed; see binkattach.pas;
+                                         this build needs the MKMsg units)
       listen   yes              accept calls (default yes)
       port     24554            listen port
       bind     127.0.0.1        listen address (default: all)
@@ -103,6 +108,8 @@ type
     OnInbound     : String;        { command run after a session that received files }
     HookTimeout   : Integer;
     Bso           : String;
+    Netmail       : String;        { attach style: *.msg directory }
+    AttachDir     : String;        { attach style: attached files }
     Zone          : Integer;       { -1 = zone of the first address }
     Listen        : Boolean;
     Port          : Word;
@@ -525,6 +532,10 @@ begin
     end
     else if Key = 'bso' then
       Bso := Val
+    else if Key = 'netmail' then
+      Netmail := Val
+    else if Key = 'attach' then
+      AttachDir := Val
     else if Key = 'zone' then
     begin
       if Num(0, 65535, V) then
@@ -607,6 +618,12 @@ begin
 
   if (ErrCount = 0) and (Length(Addresses) = 0) then
     Err('no "address" line: the mailer needs its own address');
+
+  if (ErrCount = 0) and ((Netmail <> '') <> (AttachDir <> '')) then
+    Err('"netmail" and "attach" go together: attach style needs both');
+
+  if (ErrCount = 0) and (Netmail <> '') and (Bso <> '') then
+    Err('use either "bso" or "netmail"/"attach", not both');
 
   if RetryMax < RetryMin then
     RetryMax := RetryMin;

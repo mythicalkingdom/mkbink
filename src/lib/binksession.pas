@@ -32,6 +32,7 @@ uses
   BinkQueue,
   BinkInbound,
   BinkOutbound,
+  BinkSpool,
   BinkBso,
   BinkCram,
   BinkCrypt;
@@ -123,7 +124,7 @@ type
     { transmit side }
     FOutItems  : TFPList;           { TBinkOutItem refs, in sending order }
     FNextFile  : Integer;
-    FBso       : TBinkBso;          { BSO spool to take mail from, or nil }
+    FBso       : TBinkSpool;          { BSO spool to take mail from, or nil }
     FBsoOut    : TBinkOutbound;     { what we collected from FBso }
     FLocked    : array of TFTNAddress;   { .bsy flags we hold }
     FOwnsOutbound : Boolean;
@@ -247,7 +248,7 @@ type
     { A BSO spool: everything queued there for the remote's addresses
       is sent, and the addresses' .bsy flags are held for the
       session.  May be combined with Outbound. }
-    property Bso : TBinkBso
+    property Bso : TBinkSpool
       read FBso write FBso;
 
     { Prepended to every log line, e.g. '[#3] '. }
