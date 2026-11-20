@@ -51,6 +51,14 @@ type
       const FileName : String;
       Flavour : Char;
       Action : TBinkOutAction) : String; virtual; abstract;
+
+    { Adds a file request (FTS-0006) to A: the name (wildcards allowed)
+      and a password of 6 characters or fewer, or ''.  Returns where
+      it was recorded.  A spool without file requests raises
+      EBinkError. }
+    function Request(
+      const A : TFTNAddress;
+      const Name, Password : String) : String; virtual;
   end;
 
 { Creates the lock file Path (holding our pid).  False when it exists
@@ -71,6 +79,13 @@ uses
 
 const
   STALE_LOCK_SECONDS = 12 * 3600;
+
+function TBinkSpool.Request(
+  const A : TFTNAddress;
+  const Name, Password : String) : String;
+begin
+  raise EBinkError.Create('This outbound style has no file requests');
+end;
 
 function TryLockFile(const Path : String) : Boolean;
 var

@@ -1408,7 +1408,12 @@ begin
       {$ENDIF}
     end
     else if FSetup.Bso <> '' then
-      FBso := TBinkBso.Create(FSetup.Bso, FSetup.BsoZone)
+      begin
+        FBso := TBinkBso.Create(FSetup.Bso, FSetup.BsoZone);
+
+        if Length(FSetup.Addresses) > 0 then
+          TBinkBso(FBso).SetOwn(FSetup.Addresses[0]);
+      end
     else
       Log('WARNING: no "bso" directory: nothing can be sent');
 

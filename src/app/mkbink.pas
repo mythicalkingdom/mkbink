@@ -57,6 +57,7 @@ type
     Flavour   : Char;
     QDelete   : Boolean;
     QTruncate : Boolean;
+    QRequest  : Boolean;     { queue -R: the arguments are file requests }
     QFiles    : TStringList;
   end;
 
@@ -121,6 +122,7 @@ begin
   Writeln('  mkbink poll <host[:port]> -a <our addr> [-r <remote addr>] [options]');
   Writeln('  mkbink listen -a <our addr> [options]');
   Writeln('  mkbink queue -O <bso dir> -t <addr> [-F flavour] [-x | -T] <file>...');
+  Writeln('  mkbink queue -O <bso dir> -t <addr> -R <name> [!password] ...   ask the system for files');
   Writeln('  mkbink run -f <settings file> [-S <socket>]');
   Writeln('                                     answer calls and call the links in the file;');
   Writeln('                                     -S: a Unix socket a monitor can connect to (see src/lib/binkcontrol.pas)');
@@ -163,6 +165,8 @@ begin
   Writeln('  -F FLAV   flavour: I(mmediate) C(rash) D(irect) N(ormal, default) H(old)');
   Writeln('  -x        delete the file after it was sent (default: keep it)');
   Writeln('  -T        truncate the file to 0 bytes after it was sent (BSO flow line #file)');
+  Writeln('  -R        the arguments are file requests (FTS-0006): a name, and !password (6 characters');
+  Writeln('            at most) after the name it is for; they are added to the .req of the system');
   Writeln;
   Writeln('Session:');
   Writeln('  -d DOMAIN network domain appended to our address, e.g. fidonet');
@@ -378,6 +382,8 @@ begin
       O.QDelete := True
     else if A = '-T' then
       O.QTruncate := True
+    else if (A = '-R') and (O.Mode = 'queue') then
+      O.QRequest := True
     else if A = '-k' then
       O.KillSent := True
     else if A = '-c' then
@@ -432,7 +438,12 @@ begin
     if O.QTarget = '' then
       Die('queue needs -t <address>');
     if O.QFiles.Count = 0 then
-      Die('queue needs at least one file');
+      if O.QRequest then
+        Die('queue -R needs at least one name')
+      else
+        Die('queue needs at least one file');
+    if O.QRequest and (O.BsoDir = '') then
+      Die('file requests need a BSO outbound (-O)');
   end
   else
   begin
@@ -495,6 +506,9 @@ begin
   {$ENDIF}
 
   Result := TBinkBso.Create(O.BsoDir, Z);
+
+  if O.HaveAddr then
+    TBinkBso(Result).SetOwn(O.Config.Address);
 end;
 
 { Plain directories are used when asked for with -o, or when there is
@@ -796,11 +810,44 @@ var
   Bso    : TBinkSpool;
   I      : Integer;
   Flow   : String;
+  Pw, Nm : String;
   Act    : TBinkOutAction;
 begin
   Target := ParseAddress(O.QTarget);
   Bso := MakeBso(O, Target);
   try
+    if O.QRequest then
+    begin
+      I := 0;
+
+      while I < O.QFiles.Count do
+      begin
+        if O.QFiles[I][1] = '!' then
+          Die('A password (' + O.QFiles[I] + ') must follow the name it is for');
+
+        Nm := O.QFiles[I];
+        Pw := '';
+
+        if (I + 1 < O.QFiles.Count) and (O.QFiles[I + 1][1] = '!') then
+        begin
+          Pw := Copy(O.QFiles[I + 1], 2, MaxInt);
+          Inc(I);
+
+          if Pw = '' then
+            Die('"!" needs the password after it (for ' + Nm + ')');
+        end;
+
+        Flow := Bso.Request(Target, Nm, Pw);
+
+        Writeln(Format('Requested %s from %s -> %s',
+          [Nm, AddressToString(Target), Flow]));
+        Inc(I);
+      end;
+
+      Result := 0;
+      Exit;
+    end;
+
     if O.QDelete then
       Act := oaDelete
     else if O.QTruncate then
