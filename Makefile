@@ -4,6 +4,21 @@
 #   src/app/   programs: mkbink (the mailer), testbink (small example)
 #   docs/      the FTS specification texts
 #   build/     compiler output
+#
+#   make                  build build/mkbink (and the small example build/testbink)
+#   make install          install mkbink and its notes (as root, or into a staging
+#                         directory with DESTDIR)
+#   make uninstall        remove them again
+#
+# Variables:  PREFIX=/usr/local  BINDIR=$(PREFIX)/bin
+#             DOCDIR=$(PREFIX)/share/doc/mkbink  DESTDIR=  (staging directory)
+#             MKMSG=../mk-fpc/src  the MKMsg units for attach style (see below)
+#   e.g.  make && sudo make install
+#         make install PREFIX=$HOME/.local
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+DOCDIR ?= $(PREFIX)/share/doc/mkbink
+DESTDIR ?=
 FPC    = fpc
 FLAGS  = -FUbuild -FEbuild -Fusrc/lib -vewn
 UNITS  = $(wildcard src/lib/*.pas)
@@ -35,7 +50,21 @@ build/mkbink: build $(MKMSGSTAMP) src/app/mkbink.pas $(UNITS)
 build/testbink: build src/app/testbink.pas $(UNITS)
 	$(FPC) $(FLAGS) src/app/testbink.pas
 
+# The mailer only: the MK BBS makefile (make install there) calls
+# "make build/mkbink" here and installs the result itself.
+install: build/mkbink
+	install -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(DOCDIR)
+	install -m 755 build/mkbink $(DESTDIR)$(BINDIR)/mkbink
+	install -m 644 NOTES.md $(DESTDIR)$(DOCDIR)/NOTES.md
+	install -m 644 docs/*.txt $(DESTDIR)$(DOCDIR)/
+	@echo "installed mkbink in $(DESTDIR)$(BINDIR), notes and the FTS texts in $(DESTDIR)$(DOCDIR)"
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/mkbink
+	rm -rf $(DESTDIR)$(DOCDIR)
+	@echo "removed mkbink and $(DESTDIR)$(DOCDIR)"
+
 clean:
 	rm -rf build
 
-.PHONY: all clean
+.PHONY: all install uninstall clean
