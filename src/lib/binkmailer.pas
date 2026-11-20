@@ -140,6 +140,7 @@ type
     procedure EmitLog(const Msg : String);
     procedure SessAdd(S : TBinkSession; Orig : Boolean);
     procedure SessProgress(Sender : TObject; const P : TBinkProgress);
+    procedure BatchEnded(Sender : TObject);
     procedure SessRemove(S : TBinkSession);
     function  RunProgram(const Cmd : String; Args, Env : TStrings;
       Timeout : Integer; const Tag : String) : Integer;
@@ -829,6 +830,38 @@ begin
   end;
 
   S.OnProgress := @SessProgress;
+  S.OnBatchEnd := @BatchEnded;
+end;
+
+{ The end of a batch in which files were exchanged (both sides offered
+  OPT MB): the file requests received so far are answered now, so that the
+  answer can go out in the next batch of this session. }
+procedure TBinkMailer.BatchEnded(Sender : TObject);
+var
+  S : TBinkSession;
+  I : Integer;
+  Path : String;
+  FreqOn : Boolean;
+begin
+  S := TBinkSession(Sender);
+
+  EnterCriticalSection(FLock);
+  try
+    FreqOn := FSetup.Freq;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+
+  if not FreqOn then
+    Exit;
+
+  for I := S.Received.Count - 1 downto 0 do
+    if LowerCase(ExtractFileExt(S.Received[I])) = '.req' then
+    begin
+      Path := S.Received[I];
+      S.Received.Delete(I);
+      DoFreq(S, Path);
+    end;
 end;
 
 procedure TBinkMailer.SessProgress(Sender : TObject; const P : TBinkProgress);
@@ -1093,10 +1126,12 @@ end;
       SEND<TAB>path            send this file (an absolute path), keep it
       SEND<TAB>path<TAB>^      send it and delete it after it was sent
       NOTE<TAB>text            for the log (and, later, for a netmail)
-  The files are queued for the requester as hold mail (flavour H): they are
-  sent when the requester calls us again to pick them up, and our mailer does
-  not call it for them.  (When the answer can be sent in the session that
-  brought the request it goes at once.)  The limits of the
+  The files are queued for the requester as hold mail (flavour H): when both
+  sides offered OPT MB the request is answered at the end of the batch that
+  brought it and the files go in the next batch of the same session (only to a
+  requester that called us: hold mail is not sent to a system we called);
+  otherwise they are sent when the requester calls us again to pick them up,
+  and our mailer does not call it for them.  The limits of the
   settings (freq-max-files, freq-max-kb) are kept here as well as by the
   command.  Without a password (not secure) a request is only answered with
   freq-unsecure yes.  The request and the answer file are removed. }

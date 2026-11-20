@@ -105,6 +105,11 @@ type
     FCrypt       : Boolean;    { stream encryption is active }
     FCryptPassword : String;
     FRemotePLZ   : Boolean;    { remote offered PLZ compression }
+    FRemoteMB    : Boolean;    { remote offered OPT MB: more than one batch }
+    FBatchFiles  : Integer;    { M_FILE frames sent and received in this batch }
+    FBatchNo     : Integer;
+    FDone        : TStringList;  { local paths we tried to send in this session: not collected again }
+    FOnBatchEnd  : TNotifyEvent;
     FPlz         : Boolean;    { PLZ mode is active (both offered) }
     FPlzOff      : Boolean;    { switched off by NZ: never re-enable }
     FWireSent    : Int64;      { data payload bytes actually sent }
@@ -172,6 +177,8 @@ type
 
     { transfer stage }
     procedure Transfer;
+    function  MoreBatches : Boolean;
+    procedure NextBatch;
     procedure HandleFrame(const F : TBinkFrame);
     function  TransferComplete : Boolean;
     function  PendingCount : Integer;
@@ -273,6 +280,14 @@ type
     property OnAuthenticated : TNotifyEvent
       read FOnAuthenticated write FOnAuthenticated;
 
+    { Called at the end of a batch in which files were exchanged, when a
+      new batch is about to start (OPT MB on both sides): the place to
+      act on what was received, so that what that makes available goes
+      out in the next batch.  Runs in the session's thread. }
+    property OnBatchEnd : TNotifyEvent
+      read FOnBatchEnd write FOnBatchEnd;
+    property Batches : Integer read FBatchNo;
+
     property State : TBinkState read FState;
     property RemoteCount : Integer read GetRemoteCount;
     property RemoteAddr[Index : Integer] : TFTNAddress
@@ -347,6 +362,8 @@ begin
   FOutItems := TFPList.Create;
   FKnown    := TBinkKnownFiles.Create;
   FResend   := TFPList.Create;
+  FDone     := TStringList.Create;
+  FBatchNo  := 1;
   FQueue    := TBinkCommandQueue.Create;
   SetLength(FBlock, BLOCK_SIZE);
 end;
@@ -361,6 +378,7 @@ begin
 
   FQueue.Free;
   FResend.Free;
+  FDone.Free;
   FKnown.Free;
   FOutItems.Free;
   FBsoOut.Free;
@@ -494,6 +512,9 @@ begin
   if FConfig.Compress then
     Opts := Opts + ' PLZ';
 
+  if not FConfig.NoMultiBatch then
+    Opts := Opts + ' MB';
+
   if Opts <> '' then
     SendCmd(M_NUL, 'OPT' + Opts);
 
@@ -614,6 +635,8 @@ var
     end
     else if UpperCase(W) = 'CRYPT' then
       FRemoteCrypt := True
+    else if UpperCase(W) = 'MB' then
+      FRemoteMB := True
     else if UpperCase(W) = 'PLZ' then
     begin
       FRemotePLZ := True;
@@ -1183,6 +1206,68 @@ begin
     (PendingCount = 0);
 end;
 
+{ More than one batch (OPT MB on both sides): a batch in which files were
+  exchanged is followed by another.  Both sides count the M_FILE frames of
+  the batch, sent and received, which come to the same number at both
+  ends, so both decide alike.  Between the batches the outbound is looked
+  at again (what the received files made available, e.g. the answer to a
+  file request, goes in the next batch); a batch with no file ends the
+  session. }
+function TBinkSession.MoreBatches : Boolean;
+begin
+  Result := FRemoteMB and (not FConfig.NoMultiBatch) and (FBatchFiles > 0);
+end;
+
+procedure TBinkSession.NextBatch;
+var
+  I, N : Integer;
+begin
+  Log(Format('Batch %d done (%d file(s)): starting batch %d',
+    [FBatchNo, FBatchFiles, FBatchNo + 1]));
+
+  if Assigned(FOnBatchEnd) then
+  begin
+    try
+      FOnBatchEnd(Self);
+    except
+      on E : Exception do
+        Log('Batch end handler failed: ' + E.Message);
+    end;
+
+    Touch;
+  end;
+
+  FOutItems.Clear;
+
+  if (FBso <> nil) and (FBsoOut <> nil) then
+  begin
+    FBsoOut.Clear;
+
+    for I := 0 to High(FRemote) do
+      FBso.Collect(FRemote[I], not FOriginating, FBsoOut);
+
+    FBsoOut.Notes.Clear;
+
+    { what was offered in this session is not offered again (a file the
+      remote refused would be sent again and again) }
+    for I := 0 to FBsoOut.Count - 1 do
+      if FDone.IndexOf(FBsoOut.Items[I].LocalPath) < 0 then
+        FOutItems.Add(FBsoOut.Items[I]);
+  end;
+
+  N := FOutItems.Count;
+  Log(Format('%d file(s) queued for the remote in batch %d',
+    [N, FBatchNo + 1]));
+
+  Inc(FBatchNo);
+  FBatchFiles := 0;
+  FNextFile := 0;
+  FRxState := rxWaitF;
+  FTxState := txGNF;
+  Touch;
+  Publish(True);
+end;
+
 procedure TBinkSession.Transfer;
 var
   F        : TBinkFrame;
@@ -1198,6 +1283,9 @@ begin
     FOnAuthenticated(Self);
 
   FOutItems.Clear;
+  FBatchNo := 1;
+  FBatchFiles := 0;
+  FDone.Clear;
 
   if FBso <> nil then
     PrepareBso;
@@ -1235,6 +1323,12 @@ begin
     begin
       Touch;
       HandleFrame(F);
+      ProcessQueue;
+
+      { the end of a batch is dealt with before the next frame: it may
+        belong to the next batch }
+      if TransferComplete and MoreBatches then
+        NextBatch;
     end;
 
     ProcessQueue;
@@ -1254,8 +1348,13 @@ begin
 
     if TransferComplete then
     begin
-      Log('Both sides finished, session complete');
-      Break;
+      if MoreBatches then
+        NextBatch
+      else
+      begin
+        Log('Both sides finished, session complete');
+        Break;
+      end;
     end;
 
     { output made progress counts as activity }
@@ -1338,7 +1437,10 @@ begin
     end;
 
     M_FILE :
+    begin
+      Inc(FBatchFiles);
       StartReceive(S);
+    end;
 
     M_ADR, M_PWD, M_OK :
       UnexpectedFrame(F);
@@ -1585,6 +1687,8 @@ begin
       Continue;
     end;
 
+    FDone.Add(Item.LocalPath);
+
     if FKnown.Files.FindByName(Item.WireName) <> nil then
     begin
       Log('Skipping ' + Item.LocalPath +
@@ -1650,6 +1754,7 @@ begin
   Info.NR := UseNR;
 
   SendCmd(M_FILE, BuildFILE(Info));
+  Inc(FBatchFiles);
 
   if UseNR then
     Log(Format('Offering %s (%d bytes), waiting for M_GET (NR mode)',

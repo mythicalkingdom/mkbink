@@ -92,7 +92,18 @@ An alternative to BSO, chosen with `-M <netmail dir> -A <attach dir>` (instead o
   (`<TAB>^` = delete it after it was sent) and `NOTE<TAB>text` (logged).  The files are queued for the requester as **hold mail** (flavour H,
   `TBinkSpool.Attach`: sent when the requester calls us to pick them up; our mailer does not call it for them) within the limits, which mkbink keeps as well as the command; the request and answer files are removed.
   `tests/freqtest.py` (29 checks) uses a stub command.
-* **Not in the same session:** the answer is hold mail and goes when the requester next calls us (it can call at once: it asked in a
-  call, and an unanswered request is only a reason to call again).  The session engine has one batch per session
-  (`TransferComplete`: both sides sent M_EOB); sending the answer in the session that brought the request needs a second batch after
-  the first (what binkd does), which is a change of the protocol engine and is not done.
+* **In the same session** when both sides offer multiple batches (below): `BatchEnded` (the session's `OnBatchEnd`) answers the
+  requests received so far, the answer is collected again and goes in the next batch.  Hold mail is only sent to a system that called us,
+  so a requester we called gets it at its next call; so does one that does not offer multiple batches (`multi-batch no` on either side).
+
+## Multiple batches (OPT MB; `binksession.pas`)
+
+* Both sides put ` MB` in their `M_NUL OPT` line (settings key `multi-batch yes|no`, default yes) and use it when both did; otherwise a
+  session has one batch as before (FTS-1026 only knows one).
+* Each side counts the `M_FILE` frames of the batch, sent and received (the same number at both ends).  When the batch is over (both
+  `M_EOB`, nothing pending) and the count is not 0, another batch follows; a batch in which no file moved ends the session.
+* `NextBatch`: calls `OnBatchEnd`, collects the outbound again (without locking again; hold mail only when the remote called us), leaves out
+  what this session offered already (`FDone`, so a file the remote refused is not offered again and again), resets the transmit and
+  receive state.  The end of a batch is checked after every frame, so a frame of the next batch is never taken for the old one.
+* Tested with two mkbink and a stub command (`tests/freqtest.py`) and in `mk-fpc` (`tests/freqroundtrip.py`); not tried against binkd (it
+  has an `MB` option too, which we assume means the same).

@@ -25,6 +25,9 @@ unit BinkLinks;
                                          received files; the files' full paths
                                          are the arguments; see hook-timeout
       hook-timeout 300                   seconds before the command is killed
+      multi-batch yes                    offer OPT MB: when both sides do, a session goes on with a new batch
+                                         after one in which files were exchanged, so that what a received file
+                                         request makes available is sent in the same session (default yes)
       freq     no                        answer file requests (a .req file that arrives)
       freq-unsecure no                   ... also from callers without a password
       on-freq  /usr/bin/mkfreq           run (no shell) for each request, with the arguments
@@ -114,6 +117,7 @@ type
     InboundUnsecure : String;      { '' = the same as Inbound }
     OnInbound     : String;        { command run after a session that received files }
     HookTimeout   : Integer;
+    MultiBatch    : Boolean;
     Freq          : Boolean;       { answer file requests }
     FreqUnsecure  : Boolean;       { ... also without a password }
     OnFreq        : String;        { the command that finds the files }
@@ -198,6 +202,7 @@ begin
   ScanInterval := 30;
   Inbound := 'inbound';
   HookTimeout := 300;
+  MultiBatch := True;
   FreqMaxFiles := 20;
 end;
 
@@ -257,6 +262,7 @@ begin
   Result.RequireCram := RequireCram;
   Result.NonReliable := Nr;
   Result.Compress := Plz;
+  Result.NoMultiBatch := not MultiBatch;
 
   if Length(Addresses) > 0 then
     Result.Address := Addresses[0];
@@ -542,6 +548,11 @@ begin
     begin
       if Num(1, 86400, V) then
         HookTimeout := V;
+    end
+    else if Key = 'multi-batch' then
+    begin
+      if Bool(B) then
+        MultiBatch := B;
     end
     else if Key = 'freq' then
     begin

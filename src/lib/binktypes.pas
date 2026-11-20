@@ -59,6 +59,7 @@ type
     NonReliable : Boolean; { ask the remote for NR mode (FTS-1028) }
     Compress    : Boolean; { offer PLZ dataframe compression (FTS-1029) }
     NoCrypt     : Boolean; { never use CRYPT (default: use it when offered) }
+    NoMultiBatch : Boolean; { never offer more than one batch (default: OPT MB, used when both sides offer it) }
   end;
 
 function DefaultBinkConfig : TBinkConfig;

@@ -158,7 +158,7 @@ try:
     open(onin, 'w').write('#!/bin/sh\\necho "$@" >> %s\\n' % seen)
     os.chmod(onin, 0o755)
 
-    # B answers (freq yes, two files at most), A asks; the answer is hold mail that A picks up
+    # B answers (freq yes, two files at most), A asks; the answer goes in a second batch of the session
     B2 = Node('b2', '1:110/101', 24631, 'link 1:110/291\n  host 127.0.0.1\n  port 24632\n  password secret\n',
               'freq yes\non-freq %s\nfreq-max-files 2\non-inbound %s\n' % (stub, onin))
     A2 = Node('a2', '1:110/291', 24632, 'link 1:110/101\n  host 127.0.0.1\n  port 24631\n  password secret\n')
@@ -167,14 +167,11 @@ try:
     check('A2 starts', A2.start())
     ga, gb = os.path.join(A2.inb, 'this.arc'), os.path.join(A2.inb, 'nodelist.001')
     check('the request is answered: the command ran and the files were queued', wait(lambda: b'2 file(s) queued' in B2.log(), 30))
-    time.sleep(6)                                        # B2 has a host for A2: with normal mail it would have called by now
-    check('the answer is hold mail: it waits in the outbound of the answering system (.hlo) and is not sent by a call of its own',
-          not os.path.exists(ga) and not os.path.exists(gb) and os.path.exists(os.path.join(B2.out, '006e0123.hlo'))
-          and open(os.path.join(B2.out, '006e0123.hlo')).read().split() == [os.path.join(files, 'this.arc'), os.path.join(files, 'nodelist.001')])
-    open(os.path.join(A2.dir, 'ping.txt'), 'w').write('ping')
-    subprocess.run([exe, 'queue', '-O', A2.out, '-Z', '1', '-t', '1:110/101', '-x', os.path.join(A2.dir, 'ping.txt')], check=True, capture_output=True)
-    check('... the requester calls again to pick it up: the files arrive',
-          wait(lambda: os.path.exists(ga) and os.path.exists(gb), 30) and open(ga, 'rb').read() == b'ARC data' and open(gb, 'rb').read() == b'nodelist one')
+    check('both sides offered multiple batches: the answer goes in the next batch of the SAME session (the asker did not call again)',
+          wait(lambda: os.path.exists(ga) and os.path.exists(gb), 30) and open(ga, 'rb').read() == b'ARC data' and open(gb, 'rb').read() == b'nodelist one'
+          and b'starting batch 2' in B2.log() and b'starting batch 2' in A2.log())
+    check('... the request was answered at the end of the batch that brought it, before the session ended',
+          B2.log().find(b'file(s) queued') < B2.log().find(b'session complete') and b'1 call' not in B2.log())
     lg = B2.log().decode('latin-1')
     check('... the command got the requester, secure, the request and the answer file',
           wait(lambda: os.path.exists(called), 5) and open(called).read().split('\n')[0] == '1:110/291 secure 1')
@@ -188,6 +185,27 @@ try:
     check('... counted in the log', 'File request from 1:110/291' in lg and ': 2 file(s) queued' in lg)
     A2.stop()
     B2.stop()
+
+    # no multiple batches (B6 does not offer them): the answer is hold mail and waits for the asker's next call
+    B6 = Node('b6', '1:110/106', 24639, 'link 1:110/296\n  host 127.0.0.1\n  port 24640\n  password secret\n',
+              'freq yes\non-freq %s\nfreq-max-files 2\nmulti-batch no\n' % stub)
+    A6 = Node('a6', '1:110/296', 24640, 'link 1:110/106\n  host 127.0.0.1\n  port 24639\n  password secret\n')
+    B6.start()
+    rq(A6.out, '1:110/106', 'this.arc', '!that', 'nodelist.*')
+    A6.start()
+    ga6, gb6 = os.path.join(A6.inb, 'this.arc'), os.path.join(A6.inb, 'nodelist.001')
+    check('without multiple batches: the request is answered and the files are queued', wait(lambda: b'2 file(s) queued' in B6.log(), 30))
+    time.sleep(6)                                        # B6 has a host for A6: with normal mail it would have called by now
+    check('... the answer is hold mail: it waits in the outbound (.hlo), not sent by a call of its own',
+          not os.path.exists(ga6) and not os.path.exists(gb6) and os.path.exists(os.path.join(B6.out, '006e0128.hlo'))
+          and open(os.path.join(B6.out, '006e0128.hlo')).read().split() == [os.path.join(files, 'this.arc'), os.path.join(files, 'nodelist.001')]
+          and b'starting batch 2' not in B6.log())
+    open(os.path.join(A6.dir, 'ping.txt'), 'w').write('ping')
+    subprocess.run([exe, 'queue', '-O', A6.out, '-Z', '1', '-t', '1:110/106', '-x', os.path.join(A6.dir, 'ping.txt')], check=True, capture_output=True)
+    check('... the asker calls again and picks it up',
+          wait(lambda: os.path.exists(ga6) and os.path.exists(gb6), 30) and open(ga6, 'rb').read() == b'ARC data')
+    A6.stop()
+    B6.stop()
 
     # the command fails: nothing is sent; a wrong password: a note and no file
     os.environ['STUB_FAIL'] = '1'
