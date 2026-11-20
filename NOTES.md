@@ -53,7 +53,7 @@ Later: tosser, netmail, file requests (config gives a "file request user" a leve
 * (fixed in phase 4) A remote that presents several addresses is accepted when at least one is known; the others are ignored.
 * A local `.bsy` lock held by an answering session makes a call to that link fail (counted as a failure, backoff).
 * Two callers receiving a file with identical name+size+time at once would share one `.part` file.
-* No IPv6, no file requests (.req), no binkd GZ/ND/NDA/MB/EXTCMD.
+* No IPv6, no binkd GZ/ND/NDA/MB/EXTCMD, no update requests (`+time` / `-time` in a .req) yet.
 * CRYPT has no setting in the links file (always on by default; `-E` on the command line disables it for poll/listen only).
 
 ## CRYPT (src/lib/binkcrypt.pas, commit 760c6fd)
@@ -77,3 +77,21 @@ An alternative to BSO, chosen with `-M <netmail dir> -A <attach dir>` (instead o
 * mk-fpc's tosser (`mktoss`) is the `on-inbound` command when the sysop switches it on (mkbinkcfg writes the line); mklisten starts mkbink with `MK=<BBS config dir>` in its environment because the hook needs it.  Verified end to end by mk-fpc's `tests/tosshooktest.py`.
 
 * `mkbink queue -T` truncates the file after it was sent (flow line `#file`), `-x` deletes it (`^file`); mk-fpc's tosser uses both for file attach netmail.
+
+## File requests (FTS-0006; plan in mk-fpc `FREQ-PLAN.md`)
+
+* **Sending** (`binkbso.pas`): `mkbink queue -O DIR -t ADDR -R name [!password] ...` adds lines `name !password` (CR LF, password at most 6
+  characters, no duplicates) to the system's `<net><node>.req` in the BSO outbound.  A non-empty `.req` counts as normal mail (the
+  mailer calls for it), is sent as `<our net><our node>.req`, and is deleted when the remote has it (M_GOT).
+* **Answering** (`binkmailer.pas`, `DoFreq`): settings `freq yes|no` (default no: a .req is then an ordinary file), `freq-unsecure
+  yes|no` (callers without a password; default no: the request is ignored and removed), `on-freq <command>`, `freq-max-files` (20),
+  `freq-max-kb` (0 = no limit).  After a session that received `*.req` files (and not given to `on-inbound`), the command is run, one at
+  a time and killed after `hook-timeout`, with `<requester> <secure|unsecure> <request file> <answer file>` and `MKBINK_REMOTE`,
+  `MKBINK_SECURE`, `MKBINK_ORIG` in the environment.  It writes the answer file: tab separated lines `SEND<TAB>/absolute/path`
+  (`<TAB>^` = delete it after it was sent) and `NOTE<TAB>text` (logged).  The files are queued for the requester (normal flavour,
+  `TBinkSpool.Attach`) within the limits, which mkbink keeps as well as the command; the request and answer files are removed.
+  `tests/freqtest.py` (29 checks) uses a stub command.
+* **Not in the same session:** the answer is queued and goes with the next call (the answering system calls the requester when it has
+  a host for it; a requester that only answers calls gets it when it calls us again).  The session engine has one batch per session
+  (`TransferComplete`: both sides sent M_EOB); sending the answer in the session that brought the request needs a second batch after
+  the first (what binkd does), which is a change of the protocol engine and is not done.

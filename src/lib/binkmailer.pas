@@ -141,7 +141,10 @@ type
     procedure SessAdd(S : TBinkSession; Orig : Boolean);
     procedure SessProgress(Sender : TObject; const P : TBinkProgress);
     procedure SessRemove(S : TBinkSession);
+    function  RunProgram(const Cmd : String; Args, Env : TStrings;
+      Timeout : Integer; const Tag : String) : Integer;
     procedure RunHook(S : TBinkSession; const Cmd : String; Timeout : Integer);
+    procedure DoFreq(S : TBinkSession; const ReqPath : String);
     procedure InboundDone(Sender : TObject; Session : TBinkSession);
     function  BuildState : String;
     function  Hello : String;
@@ -851,8 +854,9 @@ procedure TBinkMailer.SessRemove(S : TBinkSession);
 var
   I : Integer;
   E : TSessEntry;
-  Cmd : String;
+  Cmd, Path : String;
   Tmo : Integer;
+  FreqOn : Boolean;
 begin
   EnterCriticalSection(FSessLock);
   try
@@ -880,6 +884,23 @@ begin
     LeaveCriticalSection(FSessLock);
   end;
 
+  { file requests (a .req file received) are answered, not tossed }
+  EnterCriticalSection(FLock);
+  try
+    FreqOn := FSetup.Freq;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+
+  if FreqOn then
+    for I := S.Received.Count - 1 downto 0 do
+      if LowerCase(ExtractFileExt(S.Received[I])) = '.req' then
+      begin
+        Path := S.Received[I];
+        S.Received.Delete(I);
+        DoFreq(S, Path);
+      end;
+
   if S.Received.Count > 0 then
   begin
     EnterCriticalSection(FLock);
@@ -895,16 +916,13 @@ begin
   end;
 end;
 
-{ The command named by on-inbound, run without a shell with the paths of the
-  files this session received as its arguments, and in its environment
-    MKBINK_REMOTE   the remote's addresses
-    MKBINK_SECURE   1 if the remote used a password, else 0
-    MKBINK_ORIG     1 if we called, 0 if it called us
-    MKBINK_FILES    the number of files
-  One at a time (a tosser does not want two of itself); killed after the
-  timeout.  Its output goes into the log. }
-procedure TBinkMailer.RunHook(S : TBinkSession; const Cmd : String;
-  Timeout : Integer);
+{ Runs Cmd without a shell, with Args after the words of Cmd and Env added to
+  the environment.  One at a time (a tosser does not want two of itself),
+  killed after Timeout seconds; its output goes into the log, every line
+  marked [Tag].  Returns the exit status, -1 when it could not be run, -2
+  when it was killed. }
+function TBinkMailer.RunProgram(const Cmd : String; Args, Env : TStrings;
+  Timeout : Integer; const Tag : String) : Integer;
 var
   P     : TProcess;
   Parts : TStringList;
@@ -927,7 +945,7 @@ var
       begin
         if All and (Rest <> '') then
         begin
-          Log('[hook] ' + Clean(Rest));
+          Log('[' + Tag + '] ' + Clean(Rest));
           Rest := '';
         end;
 
@@ -936,7 +954,7 @@ var
 
       L := Copy(Rest, 1, K - 1);
       Delete(Rest, 1, K);
-      Log('[hook] ' + Clean(L));
+      Log('[' + Tag + '] ' + Clean(L));
     until False;
   end;
 
@@ -957,6 +975,7 @@ var
   end;
 
 begin
+  Result := -1;
   EnterCriticalSection(FHookLock);
   Parts := TStringList.Create;
   P := TProcess.Create(nil);
@@ -974,20 +993,16 @@ begin
       for I := 1 to Parts.Count - 1 do
         P.Parameters.Add(Parts[I]);
 
-      for I := 0 to S.Received.Count - 1 do
-        P.Parameters.Add(S.Received[I]);
+      for I := 0 to Args.Count - 1 do
+        P.Parameters.Add(Args[I]);
 
       for I := 1 to GetEnvironmentVariableCount do
         P.Environment.Add(GetEnvironmentString(I));
 
-      P.Environment.Add('MKBINK_REMOTE=' + S.RemoteAddresses);
-      P.Environment.Add('MKBINK_SECURE=' + IntToStr(Ord(S.Secure)));
-      P.Environment.Add('MKBINK_ORIG=' + IntToStr(Ord(S.Originating)));
-      P.Environment.Add('MKBINK_FILES=' + IntToStr(S.Received.Count));
-      P.Options := [poUsePipes, poStderrToOutPut, poNoConsole];
+      for I := 0 to Env.Count - 1 do
+        P.Environment.Add(Env[I]);
 
-      Log(Format('Running %s (%d file(s) from %s)',
-        [Parts[0], S.Received.Count, S.RemoteAddresses]));
+      P.Options := [poUsePipes, poStderrToOutPut, poNoConsole];
       P.Execute;
       Start := GetTickCount64;
 
@@ -1010,19 +1025,260 @@ begin
       Flush(True);
 
       if Killed then
-        Log('[hook] killed after ' + IntToStr(Timeout) + ' s')
-      else if P.ExitStatus <> 0 then
-        Log('[hook] exit status ' + IntToStr(P.ExitStatus))
+      begin
+        Log('[' + Tag + '] killed after ' + IntToStr(Timeout) + ' s');
+        Result := -2;
+      end
       else
-        Log('[hook] done');
+      begin
+        Result := P.ExitStatus;
+
+        if Result <> 0 then
+          Log('[' + Tag + '] exit status ' + IntToStr(Result))
+        else
+          Log('[' + Tag + '] done');
+      end;
     except
       on E : Exception do
-        Log('[hook] cannot run ' + Cmd + ': ' + E.Message);
+      begin
+        Log('[' + Tag + '] cannot run ' + Cmd + ': ' + E.Message);
+        Result := -1;
+      end;
     end;
   finally
     P.Free;
     Parts.Free;
     LeaveCriticalSection(FHookLock);
+  end;
+end;
+
+{ The command named by on-inbound, run without a shell with the paths of the
+  files this session received as its arguments, and in its environment
+    MKBINK_REMOTE   the remote's addresses
+    MKBINK_SECURE   1 if the remote used a password, else 0
+    MKBINK_ORIG     1 if we called, 0 if it called us
+    MKBINK_FILES    the number of files }
+procedure TBinkMailer.RunHook(S : TBinkSession; const Cmd : String;
+  Timeout : Integer);
+var
+  Args, Env : TStringList;
+  I : Integer;
+begin
+  Args := TStringList.Create;
+  Env  := TStringList.Create;
+  try
+    for I := 0 to S.Received.Count - 1 do
+      Args.Add(S.Received[I]);
+
+    Env.Add('MKBINK_REMOTE=' + S.RemoteAddresses);
+    Env.Add('MKBINK_SECURE=' + IntToStr(Ord(S.Secure)));
+    Env.Add('MKBINK_ORIG=' + IntToStr(Ord(S.Originating)));
+    Env.Add('MKBINK_FILES=' + IntToStr(S.Received.Count));
+    Log(Format('Running %s (%d file(s) from %s)',
+      [Trim(Copy(Cmd, 1, Pos(' ', Cmd + ' ') - 1)), S.Received.Count,
+       S.RemoteAddresses]));
+    RunProgram(Cmd, Args, Env, Timeout, 'hook');
+  finally
+    Env.Free;
+    Args.Free;
+  end;
+end;
+
+{ A file request (FTS-0006) the remote sent: the command named by on-freq is
+  run with
+      <requester> <secure|unsecure> <request file> <answer file>
+  and in the environment MKBINK_REMOTE, MKBINK_SECURE, MKBINK_ORIG, as for
+  on-inbound.  The request file is a copy of what arrived; the command writes
+  the answer file, tab separated lines
+      SEND<TAB>path            send this file (an absolute path), keep it
+      SEND<TAB>path<TAB>^      send it and delete it after it was sent
+      NOTE<TAB>text            for the log (and, later, for a netmail)
+  The files are queued for the requester like any file (normal flavour): they
+  go with the next call, or at once when it calls us.  The limits of the
+  settings (freq-max-files, freq-max-kb) are kept here as well as by the
+  command.  Without a password (not secure) a request is only answered with
+  freq-unsecure yes.  The request and the answer file are removed. }
+procedure TBinkMailer.DoFreq(S : TBinkSession; const ReqPath : String);
+var
+  Cmd, AnsPath, Who, Line, Kind, Path, Rest : String;
+  Tmo, MaxFiles, I, P, Queued, Skipped : Integer;
+  MaxKb, Bytes, Sz : Int64;
+  Un : Boolean;
+  Args, Env, Ans : TStringList;
+  Remote : TFTNAddress;
+  Act : TBinkOutAction;
+  SR : TSearchRec;
+begin
+  EnterCriticalSection(FLock);
+  try
+    Cmd      := FSetup.OnFreq;
+    Tmo      := FSetup.HookTimeout;
+    MaxFiles := FSetup.FreqMaxFiles;
+    MaxKb    := FSetup.FreqMaxKb;
+    Un       := FSetup.FreqUnsecure;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+
+  Who := S.RemoteAddresses;
+  AnsPath := ReqPath + '.ans';
+
+  try
+    if (not S.Secure) and (not Un) then
+    begin
+      Log('File request from ' + Who + ' ignored: the session had no ' +
+        'password (freq-unsecure no)');
+      Exit;
+    end;
+
+    if Cmd = '' then
+    begin
+      Log('File request from ' + Who + ' ignored: no on-freq command');
+      Exit;
+    end;
+
+    if (S.RemoteCount = 0) or (FBso = nil) then
+    begin
+      Log('File request from ' + Who + ' ignored: no address or no outbound');
+      Exit;
+    end;
+
+    Remote := S.RemoteAddr[0];
+    Args := TStringList.Create;
+    Env  := TStringList.Create;
+    Ans  := TStringList.Create;
+    try
+      Args.Add(Format('%d:%d/%d', [Remote.Zone, Remote.Net, Remote.Node]) +
+        Copy('.' + IntToStr(Remote.Point), 1, 12 * Ord(Remote.Point <> 0)));
+      if S.Secure then
+        Args.Add('secure')
+      else
+        Args.Add('unsecure');
+      Args.Add(ReqPath);
+      Args.Add(AnsPath);
+      Env.Add('MKBINK_REMOTE=' + S.RemoteAddresses);
+      Env.Add('MKBINK_SECURE=' + IntToStr(Ord(S.Secure)));
+      Env.Add('MKBINK_ORIG=' + IntToStr(Ord(S.Originating)));
+      Log('File request from ' + Who + ' (' + Args[1] + '): ' +
+        Trim(Copy(Cmd, 1, Pos(' ', Cmd + ' ') - 1)));
+
+      if RunProgram(Cmd, Args, Env, Tmo, 'freq') <> 0 then
+      begin
+        Log('File request from ' + Who + ': the command failed, nothing sent');
+        Exit;
+      end;
+
+      if not FileExists(AnsPath) then
+      begin
+        Log('File request from ' + Who + ': the command wrote no answer file');
+        Exit;
+      end;
+
+      Queued := 0;
+      Skipped := 0;
+      Bytes := 0;
+
+      try
+        Ans.LoadFromFile(AnsPath);
+      except
+        on E : Exception do
+        begin
+          Log('File request from ' + Who + ': cannot read the answer: ' +
+            E.Message);
+          Exit;
+        end;
+      end;
+
+      for I := 0 to Ans.Count - 1 do
+      begin
+        Line := TrimRight(Ans[I]);
+        P := Pos(#9, Line);
+
+        if P = 0 then
+          Continue;
+
+        Kind := UpperCase(Copy(Line, 1, P - 1));
+        Rest := Copy(Line, P + 1, MaxInt);
+
+        if Kind = 'NOTE' then
+        begin
+          Log('File request from ' + Who + ': ' + Clean(Rest));
+          Continue;
+        end;
+
+        if Kind <> 'SEND' then
+          Continue;
+
+        Act := oaKeep;
+        P := Pos(#9, Rest);
+
+        if P > 0 then
+        begin
+          if Trim(Copy(Rest, P + 1, MaxInt)) = '^' then
+            Act := oaDelete;
+
+          Rest := Copy(Rest, 1, P - 1);
+        end;
+
+        Path := Rest;
+
+        if (Path = '') or (Path[1] <> PathDelim) or
+           (not FileExists(Path)) or DirectoryExists(Path) then
+        begin
+          Log('File request from ' + Who + ': not sent, not an existing ' +
+            'file with an absolute path: ' + Clean(Path));
+          Inc(Skipped);
+          Continue;
+        end;
+
+        Sz := 0;
+
+        if FindFirst(Path, faAnyFile, SR) = 0 then
+        begin
+          Sz := SR.Size;
+          FindClose(SR);
+        end;
+
+        if (MaxFiles > 0) and (Queued >= MaxFiles) then
+        begin
+          Log('File request from ' + Who + ': ' + Path +
+            ' not sent, over the limit of ' + IntToStr(MaxFiles) + ' files');
+          Inc(Skipped);
+          Continue;
+        end;
+
+        if (MaxKb > 0) and (Bytes + Sz > MaxKb * 1024) then
+        begin
+          Log('File request from ' + Who + ': ' + Path +
+            ' not sent, over the limit of ' + IntToStr(MaxKb) + ' KB');
+          Inc(Skipped);
+          Continue;
+        end;
+
+        try
+          FBso.Attach(Remote, Path, 'N', Act);
+          Inc(Queued);
+          Inc(Bytes, Sz);
+        except
+          on E : Exception do
+          begin
+            Log('File request from ' + Who + ': cannot queue ' + Path + ': ' +
+              E.Message);
+            Inc(Skipped);
+          end;
+        end;
+      end;
+
+      Log(Format('File request from %s: %d file(s) queued (%d bytes), ' +
+        '%d not sent', [Who, Queued, Bytes, Skipped]));
+    finally
+      Ans.Free;
+      Env.Free;
+      Args.Free;
+    end;
+  finally
+    DeleteFile(ReqPath);
+    DeleteFile(AnsPath);
   end;
 end;
 

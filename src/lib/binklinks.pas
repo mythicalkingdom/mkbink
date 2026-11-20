@@ -25,6 +25,13 @@ unit BinkLinks;
                                          received files; the files' full paths
                                          are the arguments; see hook-timeout
       hook-timeout 300                   seconds before the command is killed
+      freq     no                        answer file requests (a .req file that arrives)
+      freq-unsecure no                   ... also from callers without a password
+      on-freq  /usr/bin/mkfreq           run (no shell) for each request, with the arguments
+                                         <requester> <secure|unsecure> <request file> <answer file>;
+                                         it writes the answer file (see binkmailer.pas, DoFreq)
+      freq-max-files 20                  most files sent for one request (0 = no limit)
+      freq-max-kb    0                   most kilobytes for one request (0 = no limit)
       bso      /var/spool/ftn/out        BSO outbound base directory
       zone     1                         BSO default zone (default: that of
                                          the first address)
@@ -107,6 +114,11 @@ type
     InboundUnsecure : String;      { '' = the same as Inbound }
     OnInbound     : String;        { command run after a session that received files }
     HookTimeout   : Integer;
+    Freq          : Boolean;       { answer file requests }
+    FreqUnsecure  : Boolean;       { ... also without a password }
+    OnFreq        : String;        { the command that finds the files }
+    FreqMaxFiles  : Integer;
+    FreqMaxKb     : Integer;
     Bso           : String;
     Netmail       : String;        { attach style: *.msg directory }
     AttachDir     : String;        { attach style: attached files }
@@ -186,6 +198,7 @@ begin
   ScanInterval := 30;
   Inbound := 'inbound';
   HookTimeout := 300;
+  FreqMaxFiles := 20;
 end;
 
 destructor TBinkSetup.Destroy;
@@ -529,6 +542,28 @@ begin
     begin
       if Num(1, 86400, V) then
         HookTimeout := V;
+    end
+    else if Key = 'freq' then
+    begin
+      if Bool(B) then
+        Freq := B;
+    end
+    else if Key = 'freq-unsecure' then
+    begin
+      if Bool(B) then
+        FreqUnsecure := B;
+    end
+    else if Key = 'on-freq' then
+      OnFreq := Val
+    else if Key = 'freq-max-files' then
+    begin
+      if Num(0, 100000, V) then
+        FreqMaxFiles := V;
+    end
+    else if Key = 'freq-max-kb' then
+    begin
+      if Num(0, 100000000, V) then
+        FreqMaxKb := V;
     end
     else if Key = 'bso' then
       Bso := Val

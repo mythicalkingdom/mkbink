@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""File requests, sending side (FTS-0006): mkbink queue -R writes the .req of a system, and a .req in the outbound is sent to it
-(and removed when it has it).  Answering a request is not tested here.
+"""File requests (FTS-0006).  Sending side: mkbink queue -R writes the .req of a system, and a .req in the outbound is sent to it
+(and removed when it has it).  Receiving side: a .req that arrives is answered by the command of on-freq (freq yes), the files it
+names are queued for the requester and sent; limits, unsecure callers, a failing command.
 usage: tests/freqtest.py"""
 import os, shutil, signal, subprocess, sys, tempfile, time
 
@@ -31,8 +32,35 @@ def rq(out, to, *args, zone='1'):
     return subprocess.run([exe, 'queue', '-O', out, '-Z', zone, '-t', to, '-R'] + list(args), capture_output=True, text=True)
 
 
+STUB = '''#!/usr/bin/env python3
+import os, sys
+who, mode, req, ans = sys.argv[1:5]
+open(CALLED, 'a').write('%s %s %s\\n' % (who, mode, os.environ.get('MKBINK_SECURE')))
+if os.environ.get('STUB_FAIL'):
+    sys.exit(1)
+out = []
+for line in open(req, 'rb').read().decode().split('\\n'):
+    line = line.strip()
+    if not line:
+        continue
+    name, _, pw = line.partition(' !')
+    if name == 'this.arc' and pw != 'that':
+        out.append('NOTE\\tthis.arc needs the right password')
+    elif name == 'this.arc':
+        out.append('SEND\\tFILES/this.arc')
+    elif name == 'nodelist.*':
+        out.append('SEND\\tFILES/nodelist.001')
+        out.append('SEND\\tFILES/nodelist.002\\t^')
+    else:
+        out.append('NOTE\\t%s not found' % name)
+out.append('SEND\\t/nonexistent/x.zip')
+open(ans, 'w').write('\\n'.join(out) + '\\n')
+print('stub answered', len(out))
+'''
+
+
 class Node:
-    def __init__(self, name, addr, port, links=''):
+    def __init__(self, name, addr, port, links='', extra=''):
         self.dir = os.path.join(work, name)
         self.inb, self.out, self.logf = self.dir + '/in', self.dir + '/out', self.dir + '/log'
         self.conf = self.dir + '/links.conf'
@@ -40,7 +68,7 @@ class Node:
         os.makedirs(self.out)
         with open(self.conf, 'w') as f:
             f.write('version 1\naddress %s\ninbound %s\nbso %s\nzone 1\nport %d\nbind 127.0.0.1\nretry-min 1\n'
-                    'retry-max 4\nscan-interval 1\n%s' % (addr, self.inb, self.out, port, links))
+                    'retry-max 4\nscan-interval 1\n%s%s' % (addr, self.inb, self.out, port, extra, links))
         os.chmod(self.conf, 0o600)
 
     def start(self):
@@ -100,6 +128,80 @@ try:
     B.stop()
     left = [x for x in os.listdir(A.out) if x.endswith('.req')]
     check('nothing is left in the outbound', not left)
+    # ---- the receiving side: a stub command in place of mkfreq
+    files = os.path.join(work, 'files')
+    os.makedirs(files)
+    for n, d in (('this.arc', b'ARC data'), ('nodelist.001', b'nodelist one'), ('nodelist.002', b'nodelist two')):
+        open(os.path.join(files, n), 'wb').write(d)
+    called = os.path.join(work, 'called')
+    stub = os.path.join(work, 'stub.py')
+    open(stub, 'w').write(STUB.replace('CALLED', repr(called)).replace('FILES', files))
+    os.chmod(stub, 0o755)
+    seen = os.path.join(work, 'seen')
+    onin = os.path.join(work, 'onin.sh')
+    open(onin, 'w').write('#!/bin/sh\\necho "$@" >> %s\\n' % seen)
+    os.chmod(onin, 0o755)
+
+    # B answers (freq yes, two files at most), A asks; B calls A back with the answer
+    B2 = Node('b2', '1:110/101', 24631, 'link 1:110/291\n  host 127.0.0.1\n  port 24632\n  password secret\n',
+              'freq yes\non-freq %s\nfreq-max-files 2\non-inbound %s\n' % (stub, onin))
+    A2 = Node('a2', '1:110/291', 24632, 'link 1:110/101\n  host 127.0.0.1\n  port 24631\n  password secret\n')
+    check('B2 starts', B2.start())
+    rq(A2.out, '1:110/101', 'this.arc', '!that', 'nodelist.*', 'nothere.zip')
+    check('A2 starts', A2.start())
+    ga, gb = os.path.join(A2.inb, 'this.arc'), os.path.join(A2.inb, 'nodelist.001')
+    check('the request is answered: the files the command named arrive at the asker (the answering system called back)',
+          wait(lambda: os.path.exists(ga) and os.path.exists(gb), 30) and open(ga, 'rb').read() == b'ARC data' and open(gb, 'rb').read() == b'nodelist one')
+    lg = B2.log().decode('latin-1')
+    check('... the command got the requester, secure, the request and the answer file',
+          wait(lambda: os.path.exists(called), 5) and open(called).read().split('\n')[0] == '1:110/291 secure 1')
+    check('... a NOTE of the command is in the log, a file that does not exist is not sent',
+          'not found' in lg and 'not an existing file with an absolute path: /nonexistent/x.zip' in lg)
+    check('... the limit of 2 files holds: the third is not sent, and is not deleted (^ is only after it was sent)',
+          'nodelist.002 not sent, over the limit of 2 files' in lg and not os.path.exists(os.path.join(A2.inb, 'nodelist.002'))
+          and os.path.exists(os.path.join(files, 'nodelist.002')))
+    check('... the request file is not left in the inbound and is not given to on-inbound',
+          not [f for f in os.listdir(B2.inb) if f.endswith(('.req', '.ans'))] and not os.path.exists(seen))
+    check('... counted in the log', 'File request from 1:110/291' in lg and ': 2 file(s) queued' in lg)
+    A2.stop()
+    B2.stop()
+
+    # the command fails: nothing is sent; a wrong password: a note and no file
+    os.environ['STUB_FAIL'] = '1'
+    B3 = Node('b3', '1:110/102', 24633, 'link 1:110/292\n  host 127.0.0.1\n  port 24634\n  password s\n', 'freq yes\non-freq %s\n' % stub)
+    A3 = Node('a3', '1:110/292', 24634, 'link 1:110/102\n  host 127.0.0.1\n  port 24633\n  password s\n')
+    B3.start()
+    rq(A3.out, '1:110/102', 'this.arc', '!that')
+    A3.start()
+    check('a command that fails: logged, nothing sent, the request removed',
+          wait(lambda: b'the command failed, nothing sent' in B3.log(), 20) and not os.path.exists(os.path.join(A3.inb, 'this.arc'))
+          and not [f for f in os.listdir(B3.inb) if f.endswith('.req')])
+    A3.stop()
+    B3.stop()
+    del os.environ['STUB_FAIL']
+
+    # freq no (the default): the .req is an ordinary file; a caller without a password: not answered unless freq-unsecure yes
+    open(called, 'w').close()
+    B4 = Node('b4', '1:110/103', 24635, 'link 1:110/293\n  password s\n  answer-only yes\n', 'on-freq %s\n' % stub)
+    A4 = Node('a4', '1:110/293', 24636, 'link 1:110/103\n  host 127.0.0.1\n  port 24635\n  password s\n')
+    B4.start()
+    rq(A4.out, '1:110/103', 'this.arc', '!that')
+    A4.start()
+    check('freq no (default): the .req stays in the inbound like any file, the command is not run',
+          wait(lambda: os.path.exists(os.path.join(B4.inb, '006e0125.req')), 20) and open(called).read() == '')
+    A4.stop()
+    B4.stop()
+
+    unsec = os.path.join(work, 'unsecure')
+    B5 = Node('b5', '1:110/104', 24637, '', 'freq yes\non-freq %s\naccept-unknown yes\ninbound-unsecure %s\n' % (stub, unsec))
+    A5 = Node('a5', '1:110/294', 24638, 'link 1:110/104\n  host 127.0.0.1\n  port 24637\n')
+    B5.start()
+    rq(A5.out, '1:110/104', 'this.arc', '!that')
+    A5.start()
+    check('a caller without a password: the request is ignored (freq-unsecure no), logged, the command not run',
+          wait(lambda: b'ignored: the session had no password' in B5.log(), 20) and open(called).read() == '')
+    A5.stop()
+    B5.stop()
 finally:
     for p in procs:
         if p.poll() is None:
