@@ -12,9 +12,9 @@ fails = 0
 procs = []
 
 
-def check(name, ok):
+def check(name, ok, info=''):
     global fails
-    print(('ok   ' if ok else 'FAIL ') + 'freq: ' + name)
+    print(('ok   ' if ok else 'FAIL ') + 'freq: ' + name + ('' if ok else '  ' + str(info)))
     if not ok:
         fails += 1
 
@@ -56,6 +56,49 @@ for line in open(req, 'rb').read().decode().split('\\n'):
 out.append('SEND\\t/nonexistent/x.zip')
 open(ans, 'w').write('\\n'.join(out) + '\\n')
 print('stub answered', len(out))
+'''
+
+
+SRIF_STUB = '''#!/usr/bin/env python3
+import os, shutil, sys
+srif = open(sys.argv[1]).read()
+open(COPYPATH, 'w').write(srif)
+d = dict(l.split(' ', 1) for l in srif.split('\\n') if ' ' in l)
+req, rsp = d['RequestList'].strip(), d['ResponseList'].strip()
+tmp = os.environ['MKBINK_TMP']
+out = []
+for line in open(req, 'rb').read().decode().split('\\n'):
+    name = line.strip().split(' ')[0]
+    if name == 'keep.txt':
+        out.append('+FILES/keep.txt')
+    elif name == 'erase.txt':
+        out.append('=FILES/erase.txt')
+    elif name == 'minus.txt':
+        out.append('-FILES/minus.txt')
+    elif name == 'plain.txt':
+        out.append('FILES/plain.txt')
+    elif name == 'made.lst':
+        open(os.path.join(tmp, 'made.lst'), 'w').write('made by the command')
+        out.append('=' + os.path.join(tmp, 'made.lst'))
+    elif name == 'lnk.txt':
+        os.symlink('FILES/keep.txt', os.path.join(tmp, 'lnk.txt'))
+        out.append('=' + os.path.join(tmp, 'lnk.txt'))
+open(rsp, 'w').write('\\n'.join(out) + '\\n')
+'''
+
+NAT_STUB = '''#!/usr/bin/env python3
+import os, sys
+who, mode, req, ans = sys.argv[1:5]
+tmp = os.environ['MKBINK_TMP']
+out = []
+for line in open(req, 'rb').read().decode().split('\\n'):
+    name = line.strip().split(' ')[0]
+    if name == 'natdel.txt':
+        out.append('SEND\\tFILES/natdel.txt\\t^')
+    elif name == 'made2.lst':
+        open(os.path.join(tmp, 'made2.lst'), 'w').write('made')
+        out.append('SEND\\t' + os.path.join(tmp, 'made2.lst') + '\\t^')
+open(ans, 'w').write('\\n'.join(out) + '\\n')
 '''
 
 
@@ -243,6 +286,62 @@ try:
           wait(lambda: b'ignored: the session had no password' in B5.log(), 20) and open(called).read() == '')
     A5.stop()
     B5.stop()
+    # ---------------------------------------------------------------- SRIF (on-freq-srif) and the delete rule
+    for n in ('keep.txt', 'erase.txt', 'minus.txt', 'plain.txt', 'nat.txt', 'natdel.txt'):
+        open(os.path.join(files, n), 'wb').write(n.encode())
+    copy = os.path.join(work, 'srif.copy')
+    srif_stub = os.path.join(work, 'srifstub.py')
+    open(srif_stub, 'w').write(SRIF_STUB.replace('FILES', files).replace('COPYPATH', repr(copy)))
+    os.chmod(srif_stub, 0o755)
+    B7 = Node('b7', '1:110/107', 24651, 'link 1:110/297\n  host 127.0.0.1\n  port 24652\n  password secret\n',
+              'freq yes\non-freq-srif %s\n' % srif_stub)
+    A7 = Node('a7', '1:110/297', 24652, 'link 1:110/107\n  host 127.0.0.1\n  port 24651\n  password secret\n')
+    B7.start()
+    rq(A7.out, '1:110/107', 'keep.txt', 'erase.txt', 'minus.txt', 'plain.txt', 'made.lst', 'lnk.txt', 'gone.zip')
+    A7.start()
+    got7 = lambda n: os.path.join(A7.inb, n)
+    check('SRIF: all the files named in the response list arrive (+, =, -, no prefix, a list the command made in MKBINK_TMP, a link)',
+          wait(lambda: all(os.path.exists(got7(n)) for n in ('keep.txt', 'erase.txt', 'minus.txt', 'plain.txt', 'made.lst', 'lnk.txt')), 40),
+          sorted(os.listdir(A7.inb)))
+    check('... and their contents are right', open(got7('keep.txt')).read() == 'keep.txt' and open(got7('made.lst')).read() == 'made by the command')
+    wait(lambda: b'queued' in B7.log() and b'session complete' in B7.log(), 10)
+    time.sleep(2)
+    lg7 = B7.log().decode('latin-1')
+    check('delete rule: "=" and "-" for files that are not in freq-tmp are ignored (logged), the files are still there',
+          os.path.exists(os.path.join(files, 'erase.txt')) and os.path.exists(os.path.join(files, 'minus.txt')) and
+          'erase.txt is not a plain file directly in' in lg7 and 'the delete mark is ignored' in lg7)
+    tmp7 = os.path.join(B7.inb, 'freq-tmp')
+    check('delete rule: the list the command made in freq-tmp (MKBINK_TMP) is deleted after it was sent', not os.path.exists(os.path.join(tmp7, 'made.lst')) or
+          wait(lambda: not os.path.exists(os.path.join(tmp7, 'made.lst')), 10))
+    check('delete rule: a symbolic link in freq-tmp with "=": the delete mark is ignored, the link and what it points to are kept',
+          os.path.exists(os.path.join(files, 'keep.txt')) and os.path.islink(os.path.join(tmp7, 'lnk.txt')) and 'lnk.txt is not a plain file directly in' in lg7, (os.path.islink(os.path.join(tmp7, 'lnk.txt')), [l for l in lg7.split(chr(10)) if 'lnk' in l or 'delete' in l][:6]))
+    check('... the freq-tmp directory is private (mode 700)',
+          oct(os.stat(tmp7).st_mode & 0o777) == '0o700')
+    sc = open(copy).read() if os.path.exists(copy) else ''
+    check('the SRIF file: Sysop, AKA, Baud, Time, RequestList, ResponseList, RemoteStatus PROTECTED, SystemStatus LISTED, OurAKA, Mailer',
+          all(k in sc for k in ('Sysop ', 'AKA 1:110/297', 'Baud ', 'Time -1', 'RequestList ', 'ResponseList ', 'RemoteStatus PROTECTED', 'SystemStatus LISTED',
+                                'OurAKA 1:110/107', 'Mailer mkbink', 'SessionProtocoll BINKP', 'TRANX ')), sc)
+    check('... the session password is not in it', 'secret' not in sc and 'Password' not in sc)
+    check('... the SRIF file, the request and the response list are removed afterwards',
+          not [f for f in os.listdir(B7.inb) if f.endswith(('.srif', '.rsp', '.req'))])
+    A7.stop()
+    B7.stop()
+
+    # the native interface: a "^" outside freq-tmp is ignored too, inside it the file goes
+    natstub = os.path.join(work, 'natstub.py')
+    open(natstub, 'w').write(NAT_STUB.replace('FILES', files))
+    os.chmod(natstub, 0o755)
+    B8 = Node('b8', '1:110/108', 24653, 'link 1:110/298\n  host 127.0.0.1\n  port 24654\n  password secret\n', 'freq yes\non-freq %s\n' % natstub)
+    A8 = Node('a8', '1:110/298', 24654, 'link 1:110/108\n  host 127.0.0.1\n  port 24653\n  password secret\n')
+    B8.start()
+    rq(A8.out, '1:110/108', 'natdel.txt', 'made2.lst')
+    A8.start()
+    check('native interface: both files arrive', wait(lambda: os.path.exists(os.path.join(A8.inb, 'natdel.txt')) and os.path.exists(os.path.join(A8.inb, 'made2.lst')), 40))
+    time.sleep(2)
+    check('... "^" on a file outside freq-tmp: ignored, the file is kept', os.path.exists(os.path.join(files, 'natdel.txt')) and b'natdel.txt is not a plain file directly in' in B8.log())
+    check('... "^" on a file in freq-tmp: deleted after it was sent', wait(lambda: not os.path.exists(os.path.join(B8.inb, 'freq-tmp', 'made2.lst')), 10))
+    A8.stop()
+    B8.stop()
 finally:
     for p in procs:
         if p.poll() is None:

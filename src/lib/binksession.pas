@@ -296,6 +296,10 @@ type
       read GetRemoteAddr;
     property RemoteAddresses : String read FRemoteStr;
     property Secure : Boolean read FSecure;
+    property RemoteSysName : String read FRemSys;
+    property RemoteSysop : String read FRemSysop;
+    property RemoteLocation : String read FRemLoc;
+    property RemoteVersion : String read FRemVer;
     property Originating : Boolean read FOriginating;
     property LastError : String read FLastError;
     property RemoteBusy : Boolean read FRemoteBusy;

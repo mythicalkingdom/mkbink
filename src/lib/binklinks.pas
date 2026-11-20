@@ -33,6 +33,11 @@ unit BinkLinks;
       on-freq  /usr/bin/mkfreq           run (no shell) for each request, with the arguments
                                          <requester> <secure|unsecure> <request file> <answer file>;
                                          it writes the answer file (see binkmailer.pas, DoFreq)
+      on-freq-srif /usr/bin/other-erp    instead of on-freq: a request processor that takes an SRIF file (FSC-0086 /
+                                         FSP-1040) as its only argument; its response list is read (see binkmailer.pas)
+      freq-tmp /var/spool/ftn/in/freq-tmp  the only place whose files an answer may ask to have deleted after they
+                                         were sent (default: freq-tmp in the inbound directory); the commands get it
+                                         as MKBINK_TMP.  A delete mark for any other file is ignored (the file is kept).
       freq-max-files 20                  most files sent for one request (0 = no limit)
       freq-max-kb    0                   most kilobytes for one request (0 = no limit)
       bso      /var/spool/ftn/out        BSO outbound base directory
@@ -121,6 +126,8 @@ type
     Freq          : Boolean;       { answer file requests }
     FreqUnsecure  : Boolean;       { ... also without a password }
     OnFreq        : String;        { the command that finds the files }
+    OnFreqSrif    : String;        { ... or an SRIF request processor }
+    FreqTmp       : String;        { the only place a request may have files deleted from ('' = freq-tmp in the inbound) }
     FreqMaxFiles  : Integer;
     FreqMaxKb     : Integer;
     Bso           : String;
@@ -566,6 +573,10 @@ begin
     end
     else if Key = 'on-freq' then
       OnFreq := Val
+    else if Key = 'on-freq-srif' then
+      OnFreqSrif := Val
+    else if Key = 'freq-tmp' then
+      FreqTmp := Val
     else if Key = 'freq-max-files' then
     begin
       if Num(0, 100000, V) then

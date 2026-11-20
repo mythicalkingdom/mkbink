@@ -122,3 +122,21 @@ mkmon's mailer screen has the F key for this (dialog: address, host, session pas
 monitor, not by mkbink: with the host left empty, a system that is no link, or a link with no host, is found in the nodelist index of the BBS
 (`MKNodeHost.pas` in mk-fpc, the same lookup mkbinkcfg uses: IBN / INA flags; all the nodelists of `mknodeidx` are searched, zone numbers pick
 the list; no domain).  `tests/controltest.py`, mk-fpc `tests/mailmontest.py`.
+
+## SRIF and the rule that a request never deletes a real file
+
+* **`on-freq-srif <command>`** (instead of `on-freq`; `binkmailer.pas`, `DoFreq`): the command is a request processor that speaks SRIF
+  (FSC-0086 / FSP-1040, `binkd/doc/srif.txt` rev 1.02).  It is run with one argument, an SRIF file written next to the request:
+  `Sysop`, `AKA` (every address of the remote), `Baud 115200`, `Time -1`, `RequestList` (the received `.req`), `ResponseList`,
+  `RemoteStatus PROTECTED|UNPROTECTED` (secure or not), `SystemStatus LISTED|UNLISTED` (a link or not), `SessionProtocoll BINKP`,
+  `SessionType OTHER`, `Site`, `Location`, `Mailer mkbink`, `Version`, `OurAKA`, `TRANX`.  The session password is **not** written.
+  The response list is one file name a line: `+` keep, `=` erase after it was sent, `-` erase after the session (taken as `=`), no prefix = keep.
+  It becomes the same answer lines as the native interface and goes through the same limits and hold mail.  The SRIF file, the response
+  list and the request are removed afterwards.
+* **Delete rule** (both interfaces): a delete mark (`^` of the native answer, `=` / `-` of SRIF) is obeyed only for a file that lies **directly**
+  in the freq-tmp directory (`freq-tmp <dir>`; default `freq-tmp` in the inbound directory, made with mode 700, given to the commands as
+  `MKBINK_TMP`) and is a regular file, not a link (lstat).  For any other file the mark is ignored: the file is sent and kept, and the
+  log says so ("... is not a plain file directly in <dir>: the delete mark is ignored, the file is kept").  This came out of a request processor of
+  a binkd system that wrote `=` for every file it found and deleted its own files after sending them.
+* mk-fpc: `mkfreq -S <srif file>` is the SRIF form of `mkfreq` (for binkd: `exec "mkfreq -S *S" *.req`); the list of a `@LIST` name is made
+  in `MKBINK_TMP` when it is set.  Tests: `tests/freqtest.py` (SRIF stub, the delete rule for both interfaces, links, the private directory).

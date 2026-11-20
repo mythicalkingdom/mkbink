@@ -142,6 +142,8 @@ type
     procedure SessProgress(Sender : TObject; const P : TBinkProgress);
     procedure BatchEnded(Sender : TObject);
     procedure SessRemove(S : TBinkSession);
+    function  FreqTmpDir : String;
+    function  DeleteAllowed(const Tmp, Path : String) : Boolean;
     function  RunProgram(const Cmd : String; Args, Env : TStrings;
       Timeout : Integer; const Tag : String) : Integer;
     procedure RunHook(S : TBinkSession; const Cmd : String; Timeout : Integer);
@@ -1127,6 +1129,16 @@ end;
       SEND<TAB>path            send this file (an absolute path), keep it
       SEND<TAB>path<TAB>^      send it and delete it after it was sent
       NOTE<TAB>text            for the log (and, later, for a netmail)
+  Deleting: a "^" (or, from an SRIF processor, a "=" or "-" in front of the name) is only obeyed for a file directly in the freq-tmp
+  directory (MKBINK_TMP: where a command puts what it makes for the request, such as a list of files).  For every other
+  file the mark is ignored and the file is kept: a file request can never delete a real file.
+
+  Instead of on-freq the setting on-freq-srif names a request processor that speaks SRIF (FSC-0086, FSP-1040): it is run with
+  one argument, an SRIF file (Sysop, AKA, Baud, Time, RequestList, ResponseList, RemoteStatus PROTECTED / UNPROTECTED,
+  SystemStatus LISTED / UNLISTED, SessionProtocoll, SessionType, Site, Location, Mailer, Version, OurAKA, TRANX).  Its response
+  list has one file name per line, in front a "+" (keep), "=" (erase after it was sent) or "-" (erase after the session: taken as "="), or
+  nothing (keep).  The limits and the hold mail are as below.  The SRIF file has no password of the session in it.
+
   The files are queued for the requester as hold mail (flavour H): when both
   sides offered OPT MB the request is answered at the end of the batch that
   brought it and the files go in the next batch of the same session (only to a
@@ -1136,10 +1148,51 @@ end;
   settings (freq-max-files, freq-max-kb) are kept here as well as by the
   command.  Without a password (not secure) a request is only answered with
   freq-unsecure yes.  The request and the answer file are removed. }
+function TBinkMailer.FreqTmpDir : String;
+begin
+  EnterCriticalSection(FLock);
+  try
+    Result := FSetup.FreqTmp;
+
+    if Result = '' then
+      Result := IncludeTrailingPathDelimiter(FSetup.Inbound) + 'freq-tmp';
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+
+  Result := ExpandFileName(Result);
+end;
+
+{ A delete mark is only obeyed for a file that is directly in the freq-tmp directory and is no
+  symbolic link: a request must not be able to delete a real file. }
+function TBinkMailer.DeleteAllowed(const Tmp, Path : String) : Boolean;
+var
+  Base, P : String;
+  St : Stat;
+begin
+  Result := False;
+
+  if Tmp = '' then
+    Exit;
+
+  Base := IncludeTrailingPathDelimiter(ExpandFileName(Tmp));
+  P := ExpandFileName(Path);
+
+  if ExtractFilePath(P) <> Base then
+    Exit;
+
+  { lstat: a link is looked at itself, not at what it points to }
+  if fpLStat(P, St) = 0 then
+    Result := fpS_ISREG(St.st_mode);
+end;
+
 procedure TBinkMailer.DoFreq(S : TBinkSession; const ReqPath : String);
 var
-  Cmd, AnsPath, Who, Line, Kind, Path, Rest : String;
+  Cmd, AnsPath, Who, Line, Kind, Path, Rest, Tmp, SrifPath, RspPath : String;
   Tmo, MaxFiles, I, P, Queued, Skipped : Integer;
+  Srif : Boolean;
+  Rsp : TStringList;
+  Ch : Char;
   MaxKb, Bytes, Sz : Int64;
   Un : Boolean;
   Args, Env, Ans : TStringList;
@@ -1150,6 +1203,14 @@ begin
   EnterCriticalSection(FLock);
   try
     Cmd      := FSetup.OnFreq;
+    Srif     := False;
+
+    if FSetup.OnFreqSrif <> '' then
+    begin
+      Cmd := FSetup.OnFreqSrif;
+      Srif := True;
+    end;
+
     Tmo      := FSetup.HookTimeout;
     MaxFiles := FSetup.FreqMaxFiles;
     MaxKb    := FSetup.FreqMaxKb;
@@ -1160,6 +1221,11 @@ begin
 
   Who := S.RemoteAddresses;
   AnsPath := ReqPath + '.ans';
+  SrifPath := ReqPath + '.srif';
+  RspPath := ReqPath + '.rsp';
+  Tmp := FreqTmpDir;
+  ForceDirectories(Tmp);
+  fpChmod(Tmp, &700);
 
   try
     if (not S.Secure) and (not Un) then
@@ -1186,18 +1252,76 @@ begin
     Env  := TStringList.Create;
     Ans  := TStringList.Create;
     try
-      Args.Add(Format('%d:%d/%d', [Remote.Zone, Remote.Net, Remote.Node]) +
-        Copy('.' + IntToStr(Remote.Point), 1, 12 * Ord(Remote.Point <> 0)));
-      if S.Secure then
-        Args.Add('secure')
-      else
-        Args.Add('unsecure');
-      Args.Add(ReqPath);
-      Args.Add(AnsPath);
       Env.Add('MKBINK_REMOTE=' + S.RemoteAddresses);
       Env.Add('MKBINK_SECURE=' + IntToStr(Ord(S.Secure)));
       Env.Add('MKBINK_ORIG=' + IntToStr(Ord(S.Originating)));
-      Log('File request from ' + Who + ' (' + Args[1] + '): ' +
+      Env.Add('MKBINK_TMP=' + Tmp);
+
+      if Srif then
+      begin
+        { an SRIF request processor: the only argument is the SRIF file }
+        Rsp := TStringList.Create;
+        try
+          Rsp.Add('Sysop ' + Clean(S.RemoteSysop));
+
+          for I := 0 to S.RemoteCount - 1 do
+            Rsp.Add('AKA ' + FmtAddr(S.RemoteAddr[I]));
+
+          Rsp.Add('Baud 115200');
+          Rsp.Add('Time -1');
+          Rsp.Add('RequestList ' + ReqPath);
+          Rsp.Add('ResponseList ' + RspPath);
+
+          if S.Secure then
+            Rsp.Add('RemoteStatus PROTECTED')
+          else
+            Rsp.Add('RemoteStatus UNPROTECTED');
+
+          if FSetup.FindLink(Remote) <> nil then
+            Rsp.Add('SystemStatus LISTED')
+          else
+            Rsp.Add('SystemStatus UNLISTED');
+
+          Rsp.Add('SessionProtocoll BINKP');
+          Rsp.Add('SessionType OTHER');
+
+          if S.RemoteSysName <> '' then
+            Rsp.Add('Site ' + Clean(S.RemoteSysName));
+
+          if S.RemoteLocation <> '' then
+            Rsp.Add('Location ' + Clean(S.RemoteLocation));
+
+          Rsp.Add('Mailer mkbink');
+          Rsp.Add('Version ' + Copy(BINK_VERSION_STRING,
+            Pos('/', BINK_VERSION_STRING) + 1, 20));
+
+          if Length(FSetup.Addresses) > 0 then
+            Rsp.Add('OurAKA ' + FmtAddr(FSetup.Addresses[0]));
+
+          Rsp.Add('TRANX ' + IntToHex(UnixNow - 315532800, 8));
+          Rsp.SaveToFile(SrifPath);
+          fpChmod(SrifPath, &600);
+        finally
+          Rsp.Free;
+        end;
+
+        Args.Add(SrifPath);
+      end
+      else
+      begin
+        Args.Add(Format('%d:%d/%d', [Remote.Zone, Remote.Net, Remote.Node]) +
+          Copy('.' + IntToStr(Remote.Point), 1, 12 * Ord(Remote.Point <> 0)));
+
+        if S.Secure then
+          Args.Add('secure')
+        else
+          Args.Add('unsecure');
+
+        Args.Add(ReqPath);
+        Args.Add(AnsPath);
+      end;
+
+      Log('File request from ' + Who + ' (' + Copy('unsecure', 1 + 2 * Ord(S.Secure), 8 - 2 * Ord(S.Secure)) + Copy(', SRIF', 1, 6 * Ord(Srif)) + '): ' +
         Trim(Copy(Cmd, 1, Pos(' ', Cmd + ' ') - 1)));
 
       if RunProgram(Cmd, Args, Env, Tmo, 'freq') <> 0 then
@@ -1206,24 +1330,76 @@ begin
         Exit;
       end;
 
-      if not FileExists(AnsPath) then
+      if Srif then
       begin
-        Log('File request from ' + Who + ': the command wrote no answer file');
-        Exit;
-      end;
-
-      Queued := 0;
-      Skipped := 0;
-      Bytes := 0;
-
-      try
-        Ans.LoadFromFile(AnsPath);
-      except
-        on E : Exception do
+        if not FileExists(RspPath) then
         begin
-          Log('File request from ' + Who + ': cannot read the answer: ' +
-            E.Message);
+          Log('File request from ' + Who + ': the command wrote no response list');
           Exit;
+        end;
+
+        Queued := 0;
+        Skipped := 0;
+        Bytes := 0;
+        Rsp := TStringList.Create;
+
+        try
+          try
+            Rsp.LoadFromFile(RspPath);
+          except
+            on E : Exception do
+            begin
+              Log('File request from ' + Who + ': cannot read the response list: ' + E.Message);
+              Rsp.Free;
+              Exit;
+            end;
+          end;
+
+          { the response list becomes answer lines: SEND <TAB> path [<TAB> ^] }
+          for I := 0 to Rsp.Count - 1 do
+          begin
+            Line := Trim(Rsp[I]);
+
+            if Line = '' then
+              Continue;
+
+            Ch := Line[1];
+
+            if Ch in ['+', '=', '-'] then
+              Line := Trim(Copy(Line, 2, MaxInt))
+            else
+              Ch := '+';
+
+            if Ch = '+' then
+              Ans.Add('SEND' + #9 + Line)
+            else
+              Ans.Add('SEND' + #9 + Line + #9 + '^');
+          end;
+        finally
+          Rsp.Free;
+        end;
+      end
+      else
+      begin
+        if not FileExists(AnsPath) then
+        begin
+          Log('File request from ' + Who + ': the command wrote no answer file');
+          Exit;
+        end;
+
+        Queued := 0;
+        Skipped := 0;
+        Bytes := 0;
+
+        try
+          Ans.LoadFromFile(AnsPath);
+        except
+          on E : Exception do
+          begin
+            Log('File request from ' + Who + ': cannot read the answer: ' +
+              E.Message);
+            Exit;
+          end;
         end;
       end;
 
@@ -1259,6 +1435,13 @@ begin
         end;
 
         Path := Rest;
+
+        if (Act = oaDelete) and (not DeleteAllowed(Tmp, Path)) then
+        begin
+          Log('File request from ' + Who + ': ' + Clean(Path) +
+            ' is not a plain file directly in ' + Tmp + ': the delete mark is ignored, the file is kept');
+          Act := oaKeep;
+        end;
 
         if (Path = '') or (Path[1] <> PathDelim) or
            (not FileExists(Path)) or DirectoryExists(Path) then
@@ -1317,6 +1500,8 @@ begin
   finally
     DeleteFile(ReqPath);
     DeleteFile(AnsPath);
+    DeleteFile(SrifPath);
+    DeleteFile(RspPath);
   end;
 end;
 
