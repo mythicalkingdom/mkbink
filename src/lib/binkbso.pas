@@ -31,8 +31,9 @@ unit BinkBso;
   Netmail packets (.out etc.) are sent as <hex>.pkt and deleted.
 
   File requests (FTS-0006): <net><node>.req holds one request per
-  line, "name" or "name !password" (password of 6 characters or
-  fewer), written with Request.  It counts as normal mail: a call is made
+  line, "name [!password] [+time | -time]" (password of 6 characters or
+  fewer; the time is an update request, UNIX seconds), written with
+  Request.  It counts as normal mail: a call is made
   for it, and it is sent as <our net><our node>.req (the remote knows
   who asked from the file name, and from the session) and deleted when
   the remote has it.  Answering a request is the job of whoever receives
@@ -108,7 +109,12 @@ type
 
     function Request(
       const A : TFTNAddress;
-      const Name, Password : String) : String; override;
+      const Name, Password : String;
+      const Update : String = '') : String; override;
+
+    procedure CheckRequest(
+      const Name, Password : String;
+      const Update : String = ''); override;
 
     property Base : String read FBase;
     property DefaultZone : Word read FDefaultZone;
@@ -428,17 +434,45 @@ begin
 end;
 
 
-function TBinkBso.Request(
-  const A : TFTNAddress;
-  const Name, Password : String) : String;
+{ the words of a request line, one blank between them, to compare lines }
+function CanonicalRequest(const S : String) : String;
 var
-  Lines : TStringList;
-  Line, Have : String;
-  I, P : Integer;
-  F : TextFile;
+  L : TStringList;
+  I : Integer;
+begin
+  Result := '';
+  L := TStringList.Create;
+  try
+    L.Delimiter := ' ';
+    L.StrictDelimiter := True;
+    L.DelimitedText := Trim(S);
+
+    for I := 0 to L.Count - 1 do
+      if L[I] <> '' then
+      begin
+        if Result <> '' then
+          Result := Result + ' ';
+
+        Result := Result + L[I];
+      end;
+  finally
+    L.Free;
+  end;
+end;
+
+procedure TBinkBso.CheckRequest(
+  const Name, Password : String;
+  const Update : String);
+var
+  I : Integer;
 begin
   if Name = '' then
     raise EBinkError.Create('A file request needs a name');
+
+  if Name[1] in ['+', '-'] then
+    raise EBinkError.CreateFmt(
+      'The name "%s" cannot be requested (it would look like an ' +
+      'update request)', [Name]);
 
   for I := 1 to Length(Name) do
     if (Name[I] <= ' ') or (Name[I] = '!') or (Name[I] = '/') or
@@ -457,10 +491,41 @@ begin
       raise EBinkError.CreateFmt(
         'The password for %s has a blank or a control character', [Name]);
 
+  if Update <> '' then
+  begin
+    if (Length(Update) < 2) or (Length(Update) > 11) or
+       not (Update[1] in ['+', '-']) then
+      raise EBinkError.CreateFmt(
+        'The update request "%s" for %s is not a sign and a time',
+        [Update, Name]);
+
+    for I := 2 to Length(Update) do
+      if not (Update[I] in ['0'..'9']) then
+        raise EBinkError.CreateFmt(
+          'The update request "%s" for %s is not a sign and a time',
+          [Update, Name]);
+  end;
+end;
+
+function TBinkBso.Request(
+  const A : TFTNAddress;
+  const Name, Password : String;
+  const Update : String) : String;
+var
+  Lines : TStringList;
+  Line : String;
+  I : Integer;
+  F : TextFile;
+begin
+  CheckRequest(Name, Password, Update);
+
   Line := Name;
 
   if Password <> '' then
     Line := Line + ' !' + Password;
+
+  if Update <> '' then
+    Line := Line + ' ' + Update;
 
   ForceDirectories(LinkDir(A));
 
@@ -478,16 +543,8 @@ begin
       end;
 
       for I := 0 to Lines.Count - 1 do
-      begin
-        Have := Trim(Lines[I]);
-        P := Pos(' !', Have);
-
-        if P > 0 then
-          Have := Copy(Have, 1, P - 1) + ' !' + Trim(Copy(Have, P + 2, MaxInt));
-
-        if SameText(Have, Line) then
+        if SameText(CanonicalRequest(Lines[I]), Line) then
           Exit;
-      end;
     finally
       Lines.Free;
     end;

@@ -1093,8 +1093,10 @@ end;
       SEND<TAB>path            send this file (an absolute path), keep it
       SEND<TAB>path<TAB>^      send it and delete it after it was sent
       NOTE<TAB>text            for the log (and, later, for a netmail)
-  The files are queued for the requester like any file (normal flavour): they
-  go with the next call, or at once when it calls us.  The limits of the
+  The files are queued for the requester as hold mail (flavour H): they are
+  sent when the requester calls us again to pick them up, and our mailer does
+  not call it for them.  (When the answer can be sent in the session that
+  brought the request it goes at once.)  The limits of the
   settings (freq-max-files, freq-max-kb) are kept here as well as by the
   command.  Without a password (not secure) a request is only answered with
   freq-unsecure yes.  The request and the answer file are removed. }
@@ -1256,7 +1258,7 @@ begin
         end;
 
         try
-          FBso.Attach(Remote, Path, 'N', Act);
+          FBso.Attach(Remote, Path, 'H', Act);
           Inc(Queued);
           Inc(Bytes, Sz);
         except

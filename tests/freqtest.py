@@ -107,6 +107,22 @@ try:
     r = rq(o, '1:12/2', 'x.zip', '!1234567')
     check('a password of more than 6 characters is refused (nothing written)', r.returncode != 0 and '6 characters' in (r.stdout + r.stderr) and open(f, 'rb').read() == n0)
     check('a password of 6 characters is fine', rq(o, '1:12/2', 'y.zip', '!123456').returncode == 0)
+    # update requests: a sign and a UNIX time after the name (and the password)
+    u = os.path.join(work, 'u')
+    r = rq(u, '1:12/2', 'NEWOPUS.*', '+599634000', 'this.arc', '!that', '-599634000', 'old.zip', '+5')
+    fu = os.path.join(u, '000c0002.req')
+    check('update requests: name +time, name !password -time (the order of the spec: password, then the time)',
+          r.returncode == 0 and open(fu, 'rb').read() == b'NEWOPUS.* +599634000\r\nthis.arc !that -599634000\r\nold.zip +5\r\n')
+    rq(u, '1:12/2', 'newopus.*', '+599634000')
+    check('the same name with the same time is not written twice; another time is another request',
+          open(fu, 'rb').read().lower().count(b'newopus') == 1 and rq(u, '1:12/2', 'newopus.*', '+599634001').returncode == 0
+          and open(fu, 'rb').read().lower().count(b'newopus') == 2)
+    n1 = open(fu, 'rb').read()
+    for bad in (['+599634000'], ['-5'], ['x.zip', '+5', '!pw'], ['x.zip', '+'], ['x.zip', '+12a']):
+        r = rq(u, '1:12/2', *bad)
+        check('refused: %r' % (bad,), r.returncode != 0 and open(fu, 'rb').read() == n1)
+    r = subprocess.run([exe, 'queue', '-O', u, '-Z', '1', '-t', '1:12/2', '-R', 'z.zip', '+12345678901'], capture_output=True, text=True)
+    check('a time of more than 10 digits is refused', r.returncode != 0 and open(fu, 'rb').read() == n1)
     for bad in (['a b'], ['dir/x.zip'], ['a\\b'], ['!pw'], ['x.zip', '!']):
         r = rq(o, '1:12/2', *bad)
         check('refused: %r' % (bad,), r.returncode != 0 and open(f, 'rb').read().count(b'\n') == n0.count(b'\n') + 1)
@@ -142,7 +158,7 @@ try:
     open(onin, 'w').write('#!/bin/sh\\necho "$@" >> %s\\n' % seen)
     os.chmod(onin, 0o755)
 
-    # B answers (freq yes, two files at most), A asks; B calls A back with the answer
+    # B answers (freq yes, two files at most), A asks; the answer is hold mail that A picks up
     B2 = Node('b2', '1:110/101', 24631, 'link 1:110/291\n  host 127.0.0.1\n  port 24632\n  password secret\n',
               'freq yes\non-freq %s\nfreq-max-files 2\non-inbound %s\n' % (stub, onin))
     A2 = Node('a2', '1:110/291', 24632, 'link 1:110/101\n  host 127.0.0.1\n  port 24631\n  password secret\n')
@@ -150,7 +166,14 @@ try:
     rq(A2.out, '1:110/101', 'this.arc', '!that', 'nodelist.*', 'nothere.zip')
     check('A2 starts', A2.start())
     ga, gb = os.path.join(A2.inb, 'this.arc'), os.path.join(A2.inb, 'nodelist.001')
-    check('the request is answered: the files the command named arrive at the asker (the answering system called back)',
+    check('the request is answered: the command ran and the files were queued', wait(lambda: b'2 file(s) queued' in B2.log(), 30))
+    time.sleep(6)                                        # B2 has a host for A2: with normal mail it would have called by now
+    check('the answer is hold mail: it waits in the outbound of the answering system (.hlo) and is not sent by a call of its own',
+          not os.path.exists(ga) and not os.path.exists(gb) and os.path.exists(os.path.join(B2.out, '006e0123.hlo'))
+          and open(os.path.join(B2.out, '006e0123.hlo')).read().split() == [os.path.join(files, 'this.arc'), os.path.join(files, 'nodelist.001')])
+    open(os.path.join(A2.dir, 'ping.txt'), 'w').write('ping')
+    subprocess.run([exe, 'queue', '-O', A2.out, '-Z', '1', '-t', '1:110/101', '-x', os.path.join(A2.dir, 'ping.txt')], check=True, capture_output=True)
+    check('... the requester calls again to pick it up: the files arrive',
           wait(lambda: os.path.exists(ga) and os.path.exists(gb), 30) and open(ga, 'rb').read() == b'ARC data' and open(gb, 'rb').read() == b'nodelist one')
     lg = B2.log().decode('latin-1')
     check('... the command got the requester, secure, the request and the answer file',

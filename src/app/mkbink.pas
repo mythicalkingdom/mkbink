@@ -122,7 +122,7 @@ begin
   Writeln('  mkbink poll <host[:port]> -a <our addr> [-r <remote addr>] [options]');
   Writeln('  mkbink listen -a <our addr> [options]');
   Writeln('  mkbink queue -O <bso dir> -t <addr> [-F flavour] [-x | -T] <file>...');
-  Writeln('  mkbink queue -O <bso dir> -t <addr> -R <name> [!password] ...   ask the system for files');
+  Writeln('  mkbink queue -O <bso dir> -t <addr> -R <name> [!password] [+time|-time] ...   ask the system for files');
   Writeln('  mkbink run -f <settings file> [-S <socket>]');
   Writeln('                                     answer calls and call the links in the file;');
   Writeln('                                     -S: a Unix socket a monitor can connect to (see src/lib/binkcontrol.pas)');
@@ -165,8 +165,9 @@ begin
   Writeln('  -F FLAV   flavour: I(mmediate) C(rash) D(irect) N(ormal, default) H(old)');
   Writeln('  -x        delete the file after it was sent (default: keep it)');
   Writeln('  -T        truncate the file to 0 bytes after it was sent (BSO flow line #file)');
-  Writeln('  -R        the arguments are file requests (FTS-0006): a name, and !password (6 characters');
-  Writeln('            at most) after the name it is for; they are added to the .req of the system');
+  Writeln('  -R        the arguments are file requests (FTS-0006): a name, then !password (6 characters');
+  Writeln('            at most), then +time or -time (an update request: UNIX seconds; + = files newer than');
+  Writeln('            that, - = files up to and including it); added to the .req of the system.  -R first.');
   Writeln;
   Writeln('Session:');
   Writeln('  -d DOMAIN network domain appended to our address, e.g. fidonet');
@@ -201,6 +202,19 @@ procedure Die(const Msg : String);
 begin
   Writeln(StdErr, Msg);
   Halt(2);
+end;
+
+{ -R: an update request, + or - and digits (a "-" argument would be an option) }
+function IsUpdateArg(const A : String) : Boolean;
+var
+  I : Integer;
+begin
+  Result := (Length(A) >= 2) and (A[1] in ['+', '-']);
+
+  if Result then
+    for I := 2 to Length(A) do
+      if not (A[I] in ['0'..'9']) then
+        Result := False;
 end;
 
 procedure ParseOptions(var O : TOptions);
@@ -397,6 +411,8 @@ begin
     else if (A <> '') and (A[1] <> '-') and (O.Mode = 'poll') and
             (O.Target = '') then
       O.Target := A
+    else if (O.Mode = 'queue') and O.QRequest and IsUpdateArg(A) then
+      O.QFiles.Add(A)                      { -R: an update request, -599634000 }
     else if (A <> '') and (A[1] <> '-') and (O.Mode = 'queue') then
       O.QFiles.Add(A)
     else
@@ -810,7 +826,9 @@ var
   Bso    : TBinkSpool;
   I      : Integer;
   Flow   : String;
-  Pw, Nm : String;
+  Pw, Nm, Up, Rest : String;
+  P      : Integer;
+  Reqs   : TStringList;
   Act    : TBinkOutAction;
 begin
   Target := ParseAddress(O.QTarget);
@@ -819,14 +837,17 @@ begin
     if O.QRequest then
     begin
       I := 0;
+      Reqs := TStringList.Create;
 
       while I < O.QFiles.Count do
       begin
-        if O.QFiles[I][1] = '!' then
-          Die('A password (' + O.QFiles[I] + ') must follow the name it is for');
+        if (O.QFiles[I][1] = '!') or IsUpdateArg(O.QFiles[I]) then
+          Die('A password or an update request (' + O.QFiles[I] +
+              ') must follow the name it is for');
 
         Nm := O.QFiles[I];
         Pw := '';
+        Up := '';
 
         if (I + 1 < O.QFiles.Count) and (O.QFiles[I + 1][1] = '!') then
         begin
@@ -837,12 +858,40 @@ begin
             Die('"!" needs the password after it (for ' + Nm + ')');
         end;
 
-        Flow := Bso.Request(Target, Nm, Pw);
+        if (I + 1 < O.QFiles.Count) and IsUpdateArg(O.QFiles[I + 1]) then
+        begin
+          Up := O.QFiles[I + 1];
+          Inc(I);
+        end;
+
+        Reqs.Add(Nm + #9 + Pw + #9 + Up);
+        Inc(I);
+      end;
+
+      { all of it is checked before any of it is written }
+      for I := 0 to Reqs.Count - 1 do
+      begin
+        P := Pos(#9, Reqs[I]);
+        Nm := Copy(Reqs[I], 1, P - 1);
+        Rest := Copy(Reqs[I], P + 1, MaxInt);
+        P := Pos(#9, Rest);
+        Bso.CheckRequest(Nm, Copy(Rest, 1, P - 1), Copy(Rest, P + 1, MaxInt));
+      end;
+
+      for I := 0 to Reqs.Count - 1 do
+      begin
+        P := Pos(#9, Reqs[I]);
+        Nm := Copy(Reqs[I], 1, P - 1);
+        Rest := Copy(Reqs[I], P + 1, MaxInt);
+        P := Pos(#9, Rest);
+        Flow := Bso.Request(Target, Nm, Copy(Rest, 1, P - 1),
+          Copy(Rest, P + 1, MaxInt));
 
         Writeln(Format('Requested %s from %s -> %s',
           [Nm, AddressToString(Target), Flow]));
-        Inc(I);
       end;
+
+      Reqs.Free;
 
       Result := 0;
       Exit;
