@@ -40,7 +40,7 @@ Separate process, supervised by mklisten (`"mailer"` port type in mklisten.json)
 4. **DONE**: `mkbink run -S <socket>` makes a Unix socket (mode 600; mklisten passes `<rundir>/mailer.sock`) that a monitor connects to.
    Text lines: HELLO, the last 200 LOG lines, then STATE ... END frames (ME, STAT, LINK, SESS lines, tab separated; layout in the
    comment above `BuildState` in `src/lib/binkmailer.pas`) every 250 ms during a session, otherwise on a change and every 5 s;
-   LOG lines as they happen.  Commands (answered by one ACK/ERR line): POLL <addr>|*, HOLD, FREE, RESCAN, RELOAD, ABORT <id>, PING
+   LOG lines as they happen.  Commands (answered by one ACK/ERR line): POLL <addr>|*, HOLD, FREE, RESCAN, RELOAD, ABORT <id>, PING, REQ (below)
    (`src/lib/binkcontrol.pas`).  The session publishes its progress (`OnProgress`, `TBinkProgress`: remote names from M_NUL, bytes, files,
    file being sent / received with position) from its own thread.  mkmon (mk-fpc, `src/MKMonMail.pas`, key M in the node list) shows it in
    the style of the FrontDoor status screen.  `tests/controltest.py [--big MB]` tests the socket with two mailers.
@@ -107,3 +107,17 @@ An alternative to BSO, chosen with `-M <netmail dir> -A <attach dir>` (instead o
   receive state.  The end of a batch is checked after every frame, so a frame of the next batch is never taken for the old one.
 * Tested with two mkbink and a stub command (`tests/freqtest.py`) and in `mk-fpc` (`tests/freqroundtrip.py`); not tried against binkd (it
   has an `MB` option too, which we assume means the same).
+
+## File requests from the control socket (REQ)
+
+`REQ <addr> <host[:port]|-> <session password|-> <0|1> <name [!pw] [+time|-time]>[|<more>...]` (binkmailer.pas, `HandleRequest`): the
+requests are checked as a whole (`CheckRequest`), written to the `.req` of the address (`Request`), and with 1 the system is called at once.
+`-` as host uses the host of the link (`Force`); a host given is called as it is, with no entry in the links file needed (a temporary
+`TBinkLink`; the password is the one given, else the link's when the host is the link's, else none = an unsecure session); our AKA and the
+Plz/Nr settings come from the link when there is one.  A system that is no link and that answers only callers it knows ("Bad address") must be told: `accept-unknown yes` lets strangers call (with the
+global `password`, or none: an unsecure session; `freq-unsecure yes` then answers their requests, the classic anonymous file request;
+`freqtest.py` and `controltest.py` cover it).
+mkmon's mailer screen has the F key for this (dialog: address, host, session password, files, call now).  The host is looked up by the
+monitor, not by mkbink: with the host left empty, a system that is no link, or a link with no host, is found in the nodelist index of the BBS
+(`MKNodeHost.pas` in mk-fpc, the same lookup mkbinkcfg uses: IBN / INA flags; all the nodelists of `mknodeidx` are searched, zone numbers pick
+the list; no domain).  `tests/controltest.py`, mk-fpc `tests/mailmontest.py`.

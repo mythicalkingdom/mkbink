@@ -150,6 +150,7 @@ type
     function  BuildState : String;
     function  Hello : String;
     function  HandleCommand(const Cmd : String) : String;
+    function  HandleRequest(const Arg : String) : String;
     procedure ControlTick;
     function  FindLinkState(const Key : String) : TLinkState;
     function  State(Link : TBinkLink) : TLinkState;
@@ -1482,6 +1483,226 @@ begin
   Result := Result + BuildState;
 end;
 
+{ REQ <addr> <host[:port]|-> <session password|-> <0|1> <request>[|<request>...]
+  A request is "name [!password] [+time|-time]".  The requests are checked
+  and written to the .req of the address; with 1 the system is called at
+  once.  A host other than "-" is called as it is (no entry in the links
+  file is needed: no password unless one is given, so an unsecure session);
+  "-" uses the host of the link. }
+function TBinkMailer.HandleRequest(const Arg : String) : String;
+var
+  Parts, Reqs, Toks : TStringList;
+  A : TFTNAddress;
+  L, Tmp : TBinkLink;
+  St : TLinkState;
+  I, J, P : Integer;
+  Host, Pw, Line : String;
+  Port : Word;
+  DoPoll : Boolean;
+  Names, Pws, Ups : TStringList;
+  Nm, Up, Tok : String;
+
+  function IsUp(const S : String) : Boolean;
+  var
+    K : Integer;
+  begin
+    Result := (Length(S) >= 2) and (S[1] in ['+', '-']);
+
+    if Result then
+      for K := 2 to Length(S) do
+        if not (S[K] in ['0'..'9']) then
+          Result := False;
+  end;
+
+begin
+  Result := 'ERR usage: REQ addr host|- password|- 0|1 name [!pw] [+time]|...';
+
+  if FBso = nil then
+    Exit('ERR no outbound to put a request in');
+
+  Parts := TStringList.Create;
+  Reqs := TStringList.Create;
+  Toks := TStringList.Create;
+  Names := TStringList.Create;
+  Pws := TStringList.Create;
+  Ups := TStringList.Create;
+
+  try
+    { the first five words, then the rest }
+    Line := Arg;
+
+    for I := 1 to 4 do
+    begin
+      P := Pos(' ', Line);
+
+      if P = 0 then
+        Exit;
+
+      Parts.Add(Copy(Line, 1, P - 1));
+      Line := Trim(Copy(Line, P + 1, MaxInt));
+    end;
+
+    if Line = '' then
+      Exit;
+
+    if not TryParseAddress(Parts[0], A) then
+      Exit('ERR "' + Parts[0] + '" is not an address');
+
+    Host := Parts[1];
+    Pw := Parts[2];
+    DoPoll := Parts[3] = '1';
+    Port := BINK_DEFAULT_PORT;
+
+    if Host = '-' then
+      Host := ''
+    else
+    begin
+      P := Pos(':', Host);
+
+      if P > 0 then
+      begin
+        Port := StrToIntDef(Copy(Host, P + 1, MaxInt), 0);
+        Host := Copy(Host, 1, P - 1);
+
+        if (Port = 0) or (Host = '') then
+          Exit('ERR "' + Parts[1] + '" is not host:port');
+      end;
+    end;
+
+    if Pw = '-' then
+      Pw := '';
+
+    L := FSetup.FindLink(A);
+
+    if (Host = '') and DoPoll and ((L = nil) or (L.Host = '') or L.AnswerOnly) then
+      Exit('ERR ' + FmtAddr(A) + ' has no host to call; give one');
+
+    { split the requests: name, then !password, then +time/-time }
+    Toks.Delimiter := '|';
+    Toks.StrictDelimiter := True;
+    Toks.DelimitedText := Line;
+
+    for I := 0 to Toks.Count - 1 do
+    begin
+      Reqs.Clear;
+      Reqs.Delimiter := ' ';
+      Reqs.StrictDelimiter := True;
+      Reqs.DelimitedText := Trim(Toks[I]);
+
+      for J := Reqs.Count - 1 downto 0 do
+        if Reqs[J] = '' then
+          Reqs.Delete(J);
+
+      if Reqs.Count = 0 then
+        Continue;
+
+      Nm := Reqs[0];
+      Up := '';
+      Line := '';
+
+      if (Nm[1] = '!') or IsUp(Nm) then
+        Exit('ERR a password or a time must follow the name it is for');
+
+      for J := 1 to Reqs.Count - 1 do
+      begin
+        Tok := Reqs[J];
+
+        if (Tok[1] = '!') and (Length(Tok) > 1) and (Line = '') then
+          Line := Copy(Tok, 2, MaxInt)
+        else if IsUp(Tok) and (Up = '') then
+          Up := Tok
+        else
+          Exit('ERR "' + Tok + '" after ' + Nm + ' is not !password or +time/-time');
+      end;
+
+      Names.Add(Nm);
+      Pws.Add(Line);
+      Ups.Add(Up);
+    end;
+
+    if Names.Count = 0 then
+      Exit;
+
+    try
+      for I := 0 to Names.Count - 1 do
+        FBso.CheckRequest(Names[I], Pws[I], Ups[I]);
+
+      for I := 0 to Names.Count - 1 do
+        FBso.Request(A, Names[I], Pws[I], Ups[I]);
+    except
+      on E : Exception do
+        Exit('ERR ' + E.Message);
+    end;
+
+    Result := 'ACK ' + IntToStr(Names.Count) + ' request(s) for ' + FmtAddr(A);
+
+    if not DoPoll then
+    begin
+      Result := Result + ' queued';
+      Log('Control: file request queued for ' + FmtAddr(A));
+      Exit;
+    end;
+
+    if ActivePolls >= FSetup.MaxPolls then
+      Exit(Result + ' queued; too many calls going on, not called');
+
+    if L <> nil then
+      St := State(L)
+    else
+    begin
+      Tmp := TBinkLink.Create;
+      Tmp.Address := A;
+      St := State(Tmp);
+      Tmp.Free;
+    end;
+
+    if St.Active then
+      Exit(Result + ' queued; ' + St.Key + ' is being called already');
+
+    if (Host = '') then
+    begin
+      St.Force := True;
+      Result := Result + ' queued; calling ' + St.Key;
+    end
+    else
+    begin
+      Tmp := TBinkLink.Create;
+
+      try
+        Tmp.Address := A;
+        Tmp.Name := 'request';
+        Tmp.Host := Host;
+        Tmp.Port := Port;
+        Tmp.Password := Pw;
+
+        if L <> nil then
+        begin
+          Tmp.HaveUs := L.HaveUs;
+          Tmp.Us := L.Us;
+          Tmp.Plz := L.Plz;
+          Tmp.Nr := L.Nr;
+
+          if (Pw = '') and (L.Host = Host) then
+            Tmp.Password := L.Password;
+        end;
+
+        StartPoll(Tmp, St, 'file request');
+      finally
+        Tmp.Free;
+      end;
+
+      Result := Result + ' queued; calling ' + St.Key + ' at ' + Host + ':' + IntToStr(Port);
+    end;
+  finally
+    Parts.Free;
+    Reqs.Free;
+    Toks.Free;
+    Names.Free;
+    Pws.Free;
+    Ups.Free;
+  end;
+end;
+
 function TBinkMailer.HandleCommand(const Cmd : String) : String;
 var
   Verb, Arg : String;
@@ -1542,6 +1763,8 @@ begin
       LeaveCriticalSection(FSessLock);
     end;
   end
+  else if Verb = 'REQ' then
+    Result := HandleRequest(Arg)
   else if (Verb = 'POLL') or (Verb = 'HOLD') or (Verb = 'FREE') then
   begin
     if (Verb = 'POLL') and (Arg = '*') then

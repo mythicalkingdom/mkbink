@@ -112,7 +112,7 @@ def blob(name, mb):
 
 
 try:
-    bd, bconf = node('b', '1:110/100', 24702, 'link 1:110/290\n  password secret\n  answer-only yes\n')
+    bd, bconf = node('b', '1:110/100', 24702, 'link 1:110/290\n  password secret\n  answer-only yes')
     ad, aconf = node('a', '1:110/290', 24701, 'link 1:110/100\n  name Hub B\n  host 127.0.0.1\n  port 24702\n  password secret\n')
     # sockets go in a short directory (the path of a Unix socket is limited)
     sdir = tempfile.mkdtemp(prefix='s', dir='/tmp')
@@ -194,6 +194,52 @@ try:
     check('the big file arrived intact', os.path.exists(bd + '/in/big.bin') and os.path.getsize(bd + '/in/big.bin') == big * 1024 * 1024)
     check('B counts the answered call', Bc.until(lambda c: c.rec('STAT')[0][3] == '2'))
 
+    # ---- REQ: file requests, queued and optionally called at once (the monitor's request screen)
+    def reqs():
+        out = []
+        for r, _, fs in os.walk(ad + '/out'):
+            out += [os.path.join(r, f) for f in fs if f.endswith('.req')]
+        return out
+    check('REQ without enough words', (A.send('REQ 1:110/100 -') or '').startswith('ERR usage'))
+    check('REQ with a bad address', (A.send('REQ nonsense - - 0 a.zip') or '').startswith('ERR "nonsense"'))
+    check('REQ: a password has to follow a name', (A.send('REQ 1:110/100 - - 0 !pw') or '').startswith('ERR'))
+    check('REQ with a bad host:port', (A.send('REQ 1:110/100 x:0 - 0 a.zip') or '').startswith('ERR "x:0"'))
+    check('REQ and call, but the system has no host', (A.send('REQ 1:5/5 - - 1 a.zip') or '').startswith('ERR 1:5/5 has no host'))
+    check('nothing was written by the refused ones', not reqs())
+    r = A.send('REQ 1:110/100 - - 0 one.zip !pw|two.zip +599634000|three.zip')
+    check('REQ queued without a call', r is not None and r.startswith('ACK 3 request(s)') and r.endswith('queued'))
+    txt = ''.join(open(f, newline='').read() for f in reqs())
+    check('... the lines are in the .req', txt == 'one.zip !pw\r\ntwo.zip +599634000\r\nthree.zip\r\n')
+    n = A.rec('STAT')[0][0]
+    r = A.send('REQ 1:110/100 127.0.0.1:24702 secret 1 four.zip')
+    check('REQ with a host: called at once', r is not None and r.startswith('ACK 1 request(s)') and 'calling 1:110/100 at 127.0.0.1:24702' in r)
+    check('... the call is made and the .req is delivered', A.until(lambda c: any('file request' in l for l in c.lines if l.startswith('LOG ')), 20)
+          and A.until(lambda c: not reqs(), 30))
+
+    # ---- a system that is no link at all: called at the host given, an unsecure session
+    cd_, cconf = node('c', '1:110/300', 24703, 'link 1:110/301\n  answer-only yes\n  password x\n')
+    csock = sdir + '/c.sock'
+    pc = start(cd_, cconf, csock)
+    wait(lambda: os.path.exists(csock))
+    Cc = Client(csock)
+    Cc.until(lambda c: c.state is not None)
+    def clog(text):
+        return lambda c: any(text in l for l in c.lines if l.startswith('LOG '))
+    r = Cc.send('REQ 1:110/100 127.0.0.1:24702 - 1 free.zip')
+    check('REQ to a system that is no link: called at the host given', r is not None and r.startswith('ACK 1 request(s)') and 'at 127.0.0.1:24702' in r)
+    check('... a mailer that does not accept strangers refuses the call (Bad address)', Cc.until(clog('Bad address'), 30))
+    # accept-unknown yes (no global password): strangers call without a password, an unsecure session
+    txt_ = open(bconf).read().replace('version 1\n', 'version 1\naccept-unknown yes\n', 1)
+    open(bconf, 'w').write(txt_)
+    check('RELOAD of the answering mailer', Bc.send('RELOAD') == 'ACK reading the settings again')
+    time.sleep(1.5)
+    r = Cc.send('REQ 1:110/100 127.0.0.1:24702 - 1 more.zip')
+    check('the stranger calls again', r is not None and r.startswith('ACK 1 request(s)'))
+    check('... the unsecure session happens and the requests are delivered',
+          Cc.until(clog('Call to 1:110/100 finished'), 30) and not [f for f in os.listdir(cd_ + '/out') if f.endswith('.req')])
+    pc.send_signal(signal.SIGTERM)
+    pc.wait(20)
+
     # ---- abort a session: queue again and cut it
     f3 = blob('cut.bin', max(big, 1024))
     subprocess.run([exe, 'queue', '-O', ad + '/out', '-Z', '1', '-t', '1:110/100', '-x', f3], check=True, capture_output=True)
@@ -220,7 +266,8 @@ finally:
     for p in procs:
         if p.poll() is None:
             p.kill()
-    shutil.rmtree(work, ignore_errors=True)
+    if os.environ.get("KEEP") is None: shutil.rmtree(work, ignore_errors=True)
+    else: print(work)
 
 print('failures: %d' % fails)
 sys.exit(1 if fails else 0)
