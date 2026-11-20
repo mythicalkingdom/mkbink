@@ -106,6 +106,8 @@ type
     FCryptPassword : String;
     FRemotePLZ   : Boolean;    { remote offered PLZ compression }
     FRemoteMB    : Boolean;    { remote offered OPT MB: more than one batch }
+    FRemote11    : Boolean;    { remote speaks binkp 1.1 or later (its VER line) }
+    FImplicitMB  : Boolean;    { batches go on by the binkp 1.1 rule, not OPT MB }
     FBatchFiles  : Integer;    { M_FILE frames sent and received in this batch }
     FBatchNo     : Integer;
     FDone        : TStringList;  { local paths we tried to send in this session: not collected again }
@@ -309,6 +311,43 @@ uses
   DateUtils,
   BinkUtil;
 
+{ "binkd/1.1a-115/Linux binkp/1.1" -> 101; 0 when the line says nothing }
+function RemoteProtocol(const Ver : String) : Integer;
+var
+  P, I, Major, Minor : Integer;
+  S : String;
+begin
+  Result := 0;
+  P := Pos('binkp/', LowerCase(Ver));
+
+  if P = 0 then
+    Exit;
+
+  S := Copy(Ver, P + 6, 20);
+  I := 1;
+  Major := 0;
+  Minor := 0;
+
+  while (I <= Length(S)) and (S[I] in ['0'..'9']) do
+  begin
+    Major := Major * 10 + Ord(S[I]) - 48;
+    Inc(I);
+  end;
+
+  if (I <= Length(S)) and (S[I] = '.') then
+  begin
+    Inc(I);
+
+    while (I <= Length(S)) and (S[I] in ['0'..'9']) do
+    begin
+      Minor := Minor * 10 + Ord(S[I]) - 48;
+      Inc(I);
+    end;
+  end;
+
+  Result := Major * 100 + Minor;
+end;
+
 const
   BLOCK_SIZE = 16383;     { data frame size; the PLZ limit (FTS-1029) }
   OUT_LIMIT  = 65536;     { queue more data only below this backlog }
@@ -502,8 +541,15 @@ end;
 
 procedure TBinkSession.SendBanner;
 var
-  Opts : String;
+  Opts, OurProtocol : String;
 begin
+  { binkp 1.1 means "another batch follows a batch that moved files", which
+    is what lets a remote (binkd) answer a file request in the same session }
+  if FConfig.NoMultiBatch then
+    OurProtocol := BINK_PROTOCOL_STRING
+  else
+    OurProtocol := 'binkp/1.1';
+
   Opts := '';
 
   if FConfig.NonReliable then
@@ -528,7 +574,7 @@ begin
     SendCmd(M_NUL, 'LOC ' + FConfig.Location);
 
   SendCmd(M_NUL,
-    'VER ' + BINK_VERSION_STRING + ' ' + BINK_PROTOCOL_STRING);
+    'VER ' + BINK_VERSION_STRING + ' ' + OurProtocol);
 
   SendCmd(M_NUL, 'TIME ' + Rfc822Now);
 end;
@@ -602,7 +648,10 @@ begin
   else if Copy(S, 1, 4) = 'LOC ' then
     FRemLoc := Copy(S, 5, MaxInt)
   else if Copy(S, 1, 4) = 'VER ' then
+  begin
     FRemVer := Copy(S, 5, MaxInt);
+    FRemote11 := RemoteProtocol(FRemVer) > 100;
+  end;
 
   if Copy(S, 1, 4) = 'OPT ' then
   begin
@@ -958,6 +1007,8 @@ begin
   FRemoteChallenge := '';
   FRemoteHash := '';
   FRemoteNR := False;
+  FRemote11 := False;
+  FImplicitMB := False;
   FRemoteCrypt := False;
   FCryptOffered := False;
   FCrypt := False;
@@ -1215,13 +1266,16 @@ end;
   session. }
 function TBinkSession.MoreBatches : Boolean;
 begin
-  Result := FRemoteMB and (not FConfig.NoMultiBatch) and (FBatchFiles > 0);
+  Result := (FRemoteMB or FRemote11) and (not FConfig.NoMultiBatch) and
+    (FBatchFiles > 0);
 end;
 
 procedure TBinkSession.NextBatch;
 var
   I, N : Integer;
 begin
+  FImplicitMB := not FRemoteMB;
+
   Log(Format('Batch %d done (%d file(s)): starting batch %d',
     [FBatchNo, FBatchFiles, FBatchNo + 1]));
 
@@ -1366,7 +1420,24 @@ begin
     PrevOut := OutNow;
 
     if FSock.Closed and (FSock.Available = 0) then
+    begin
+      { A binkp 1.1 remote that does not go on with another batch simply
+        hangs up once both sides said M_EOB.  If we were only waiting in
+        such a batch (nothing sent, received or pending in it) all is
+        done. }
+      if FImplicitMB and (FBatchNo > 1) and (FBatchFiles = 0) and
+         (FCurrent = nil) and (FResend.Count = 0) and
+         (FQueue.Count = 0) and (PendingCount = 0) then
+      begin
+        Log('Remote closed the connection after batch ' +
+          IntToStr(FBatchNo - 1) + ' (it starts no further batch)');
+        FBatchNo := FBatchNo - 1;
+        Log('Both sides finished, session complete');
+        Break;
+      end;
+
       Fail('Connection lost: ' + FSock.LastError);
+    end;
 
     if GetTickCount64 - FLastActivity >
        QWord(FConfig.Timeout) * 1000 then
