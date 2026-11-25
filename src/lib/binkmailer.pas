@@ -203,6 +203,7 @@ uses
   BaseUnix,
   {$ENDIF}
   DateUtils,
+  BinkNet,
   BinkOutbound;
 
 function Clean(const S : String) : String;
@@ -1683,6 +1684,7 @@ var
   I, J, P : Integer;
   Host, Pw, Line : String;
   Port : Word;
+  PortNo : LongInt;
   DoPoll : Boolean;
   Names, Pws, Ups : TStringList;
   Nm, Up, Tok : String;
@@ -1742,16 +1744,15 @@ begin
       Host := ''
     else
     begin
-      P := Pos(':', Host);
+      { host, host:port, [2001:db8::1]:port or a bare IPv6 address }
+      if not NetSplitHostPort(Parts[1], Host, PortNo) then
+        Exit('ERR "' + Parts[1] + '" is not host:port');
 
-      if P > 0 then
-      begin
-        Port := StrToIntDef(Copy(Host, P + 1, MaxInt), 0);
-        Host := Copy(Host, 1, P - 1);
+      if PortNo = 0 then
+        Exit('ERR "' + Parts[1] + '" is not host:port');
 
-        if (Port = 0) or (Host = '') then
-          Exit('ERR "' + Parts[1] + '" is not host:port');
-      end;
+      if PortNo > 0 then
+        Port := PortNo;
     end;
 
     if Pw = '-' then

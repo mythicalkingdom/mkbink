@@ -50,7 +50,7 @@ unit BinkLinks;
                                          this build needs the MKMsg units)
       listen   yes              accept calls (default yes)
       port     24554            listen port
-      bind     127.0.0.1        listen address (default: all)
+      bind     127.0.0.1        listen address (default: all, IPv4 and IPv6; 0.0.0.0 is IPv4 only, ::1 or 2001:db8::7 one IPv6 address)
       max-sessions 8            callers served at once
       max-polls    1            calls made at once
       timeout  120              seconds without activity
@@ -65,7 +65,7 @@ unit BinkLinks;
 
       link 1:110/100            one block per link, up to the next "link"
         name   Hub              (display only)
-        host   10.1.0.80        needed to call it
+        host   10.1.0.80        needed to call it: a name, an IPv4 or an IPv6 address (2001:db8::1)
         port   24554
         password secret
         poll   60               call it every N minutes (default 0 = only

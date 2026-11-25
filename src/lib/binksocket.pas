@@ -4,8 +4,8 @@ unit BinkSocket;
 
 { Non-blocking, buffered TCP transport for binkp.
 
-  Built on the FPC RTL "sockets" unit (no third party libraries).
-  IPv4 only.
+  Built on the FPC RTL "sockets" unit and BinkNet (getaddrinfo of the C
+  library): IPv4 and IPv6.
 
   The socket keeps an input and an output buffer.  Send() only queues
   data; Pump() moves bytes between the buffers and the network using
@@ -19,7 +19,7 @@ uses
   SysUtils,
   Sockets,
   BaseUnix,
-  NetDB,
+  BinkNet,
   BinkCrypt;
 
 type
@@ -162,99 +162,27 @@ begin
   fpSetSockOpt(FHandle, IPPROTO_TCP, TCP_NODELAY, @One, SizeOf(One));
 end;
 
-function ResolveIPv4(const Host : String) : TInAddr;
-var
-  H : THostEntry;
-begin
-  { Result is in network byte order. }
-  Result := StrToNetAddr(Host);
-
-  if Result.s_addr <> 0 then
-    Exit;
-
-  if ResolveHostByName(Host, H) then
-  begin
-    { Despite what the FPC docs imply, ResolveHostByName returns the
-      address already in network byte order (localhost comes back as
-      $0100007F in memory, i.e. 127.0.0.1).  Do not swap it again. }
-    Result := H.Addr;
-    if Result.s_addr <> 0 then
-      Exit;
-  end;
-
-  raise EBinkSocket.CreateFmt(
-    'Cannot resolve host "%s"', [Host]);
-end;
-
 procedure TBinkSocket.Connect(
   const Host : String;
   Port : Word;
   TimeoutMs : Integer);
 var
-  Addr   : TInetSockAddr;
-  Wr     : TFDSet;
-  TV     : TTimeVal;
-  R      : cint;
-  Err    : cint;
-  Len    : TSockLen;
+  Fd  : LongInt;
+  Err : String;
 begin
   Disconnect;
 
-  FillChar(Addr, SizeOf(Addr), 0);
-  Addr.sin_family := AF_INET;
-  Addr.sin_port   := htons(Port);
-  Addr.sin_addr   := ResolveIPv4(Host);
+  { every address of the name is tried in turn (IPv6 and IPv4) }
+  if not NetConnect(Host, Port, TimeoutMs, Fd, Err) then
+    raise EBinkSocket.Create(Err);
 
-  FHandle := fpSocket(AF_INET, SOCK_STREAM, 0);
+  FHandle := Fd;
   fpFcntl(FHandle, F_SETFD, FD_CLOEXEC);   { not inherited by a command we run }
 
-  if FHandle < 0 then
-    raise EBinkSocket.Create('socket() failed');
-
   FClosed := False;
-  FRemote := Host + ':' + IntToStr(Port);
+  FRemote := NetJoinHostPort(Host, Port);
 
   SetNonBlocking;
-
-  R := fpConnect(FHandle, @Addr, SizeOf(Addr));
-
-  if R < 0 then
-  begin
-    if fpGetErrno <> ESysEINPROGRESS then
-    begin
-      Err := fpGetErrno;
-      Disconnect;
-      raise EBinkSocket.CreateFmt(
-        'Connect to %s:%d failed (errno %d)', [Host, Port, Err]);
-    end;
-
-    fpFD_ZERO(Wr);
-    fpFD_SET(FHandle, Wr);
-    TV.tv_sec  := TimeoutMs div 1000;
-    TV.tv_usec := (TimeoutMs mod 1000) * 1000;
-
-    repeat
-      R := fpSelect(FHandle + 1, nil, @Wr, nil, @TV);
-    until (R >= 0) or (fpGetErrno <> ESysEINTR);
-
-    if R <= 0 then
-    begin
-      Disconnect;
-      raise EBinkSocket.CreateFmt(
-        'Connect to %s:%d timed out', [Host, Port]);
-    end;
-
-    Err := 0;
-    Len := SizeOf(Err);
-    fpGetSockOpt(FHandle, SOL_SOCKET, SO_ERROR, @Err, @Len);
-
-    if Err <> 0 then
-    begin
-      Disconnect;
-      raise EBinkSocket.CreateFmt(
-        'Connect to %s:%d failed (errno %d)', [Host, Port, Err]);
-    end;
-  end;
 end;
 
 procedure TBinkSocket.Listen(
@@ -262,38 +190,17 @@ procedure TBinkSocket.Listen(
   const BindAddr : String;
   Backlog : Integer);
 var
-  Addr : TInetSockAddr;
-  One  : cint;
+  Fd   : LongInt;
+  What : String;
 begin
   Disconnect;
 
-  FillChar(Addr, SizeOf(Addr), 0);
-  Addr.sin_family := AF_INET;
-  Addr.sin_port   := htons(Port);
+  { '' = IPv4 and IPv6 on one socket, '0.0.0.0' = IPv4 only, or one address }
+  if not NetListen(BindAddr, Port, Fd, What) then
+    raise EBinkSocket.Create(What);
 
-  if BindAddr = '' then
-    Addr.sin_addr.s_addr := 0 { INADDR_ANY }
-  else
-    Addr.sin_addr := ResolveIPv4(BindAddr);
-
-  FHandle := fpSocket(AF_INET, SOCK_STREAM, 0);
+  FHandle := Fd;
   fpFcntl(FHandle, F_SETFD, FD_CLOEXEC);   { not inherited by a command we run }
-
-  if FHandle < 0 then
-    raise EBinkSocket.Create('socket() failed');
-
-  FClosed := False;
-
-  One := 1;
-  fpSetSockOpt(FHandle, SOL_SOCKET, SO_REUSEADDR, @One, SizeOf(One));
-
-  if fpBind(FHandle, @Addr, SizeOf(Addr)) < 0 then
-  begin
-    One := fpGetErrno;
-    Disconnect;
-    raise EBinkSocket.CreateFmt(
-      'Cannot bind port %d (errno %d)', [Port, One]);
-  end;
 
   if fpListen(FHandle, Backlog) < 0 then
   begin
@@ -301,7 +208,8 @@ begin
     raise EBinkSocket.Create('listen() failed');
   end;
 
-  FRemote := '*:' + IntToStr(Port);
+  FClosed := False;
+  FRemote := What;
 end;
 
 function TBinkSocket.Accept(TimeoutMs : Integer) : TBinkSocket;
@@ -309,8 +217,6 @@ var
   Rd   : TFDSet;
   TV   : TTimeVal;
   R    : cint;
-  Addr : TInetSockAddr;
-  Len  : TSockLen;
   H    : TSocket;
 begin
   Result := nil;
@@ -328,17 +234,16 @@ begin
   if R <= 0 then
     Exit;
 
-  Len := SizeOf(Addr);
-  H := fpAccept(FHandle, @Addr, @Len);
-  fpFcntl(H, F_SETFD, FD_CLOEXEC);   { not inherited by a command we run }
+  H := fpAccept(FHandle, nil, nil);
 
   if H < 0 then
     Exit;
 
+  fpFcntl(H, F_SETFD, FD_CLOEXEC);   { not inherited by a command we run }
+
   Result := TBinkSocket.CreateFromHandle(
     H,
-    NetAddrToStr(Addr.sin_addr) + ':' +
-      IntToStr(ntohs(Addr.sin_port)));
+    NetJoinHostPort(NetPeer(H), NetPeerPort(H)));
 end;
 
 procedure TBinkSocket.Disconnect;

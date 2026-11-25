@@ -19,6 +19,7 @@ uses
   SysUtils,
   BinkTypes,
   BinkNode,
+  BinkNet,
   BinkInbound,
   BinkOutbound,
   BinkSpool,
@@ -603,6 +604,8 @@ function DoPoll(var O : TOptions) : Integer;
 var
   Node : TBinkNodeInfo;
   P    : Integer;
+  HostPart : String;
+  PortPart : LongInt;
   Sess : TBinkSession;
   Outb : TBinkOutbound;
   Inb  : TBinkInbound;
@@ -611,18 +614,18 @@ var
 begin
   Node := Default(TBinkNodeInfo);
 
-  P := LastDelimiter(':', O.Target);
-
-  if P > 0 then
+  { host, host:port, [2001:db8::1]:port or a bare IPv6 address }
+  if not NetSplitHostPort(O.Target, HostPart, PortPart) then
   begin
-    Node.Host := Copy(O.Target, 1, P - 1);
-    Node.Port := StrToInt(Copy(O.Target, P + 1, 10));
-  end
-  else
-  begin
-    Node.Host := O.Target;
-    Node.Port := BINK_DEFAULT_PORT;
+    WriteLn(StdErr, 'mkbink: "', O.Target, '" is not host[:port]');
+    Halt(2);
   end;
+
+  Node.Host := HostPart;
+  if PortPart > 0 then
+    Node.Port := PortPart
+  else
+    Node.Port := BINK_DEFAULT_PORT;
 
   if O.Remote <> '' then
     Node.Address := ParseAddress(O.Remote);

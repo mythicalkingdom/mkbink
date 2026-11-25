@@ -16,6 +16,10 @@ settings-file and mailer tests (two instances on localhost).  Older protocol tes
 the comment at the top of `src/lib/binklinks.pas`, version 1): mkbink knows nothing about the BBS.  The BBS side
 generates that file from its own configuration (tool `mkbinkcfg`, in the mk-fpc repo, phase 2).
 
+## IPv6
+
+Sockets are in `src/lib/binknet.pas` (`getaddrinfo`, a dual stack listener): calls try every address of a host name in turn, the default listener takes IPv4 and IPv6, `bind` limits it to one address or family, `host` takes IPv6 literals (`2001:db8::1`, and `[2001:db8::1]:24554` in `poll host[:port]`).  `binknet.pas` is the same file as `MKNet.pas` of the MK BBS (mk-fpc/src), where its tests are (`tests/nettest.pas`): keep them in step.
+
 ## Behaviour of `run` (src/lib/binkmailer.pas)
 
 * Listener in a thread of its own; one thread per call made (max-polls, default 1).

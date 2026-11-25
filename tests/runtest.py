@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 1 tests: the settings file (mkbink check) and the mailer (mkbink run) with two instances on localhost.
 usage: tests/runtest.py [--slow]      (--slow also waits for a "poll 1" call, about 70 s)"""
-import os, shutil, signal, subprocess, sys, tempfile, time
+import os, shutil, signal, socket, subprocess, sys, tempfile, time
 
 here = os.path.dirname(os.path.abspath(__file__))
 exe = os.path.realpath(os.path.join(here, '..', 'build', 'mkbink'))
@@ -42,14 +42,14 @@ def wait(cond, secs=15):
 
 
 class Node:
-    def __init__(self, name, addr, port, links='', extra=''):
+    def __init__(self, name, addr, port, links='', extra='', bind='127.0.0.1'):
         self.name, self.addr, self.port = name, addr, port
         self.dir = os.path.join(work, name)
         self.conf = os.path.join(self.dir, 'links.conf')
         self.inb, self.out = self.dir + '/in', self.dir + '/out'
         self.logf = self.dir + '/log'
-        self.text = lambda links=links: ('version 1\naddress %s\ninbound %s\nbso %s\nzone 1\nport %d\nbind 127.0.0.1\n'
-                                         'retry-min 1\nretry-max 4\nscan-interval 1\n%s\n%s' % (addr, self.inb, self.out, port, extra, links))
+        self.text = lambda links=links: ('version 1\naddress %s\ninbound %s\nbso %s\nzone 1\nport %d\n%s'
+                                         'retry-min 1\nretry-max 4\nscan-interval 1\n%s\n%s' % (addr, self.inb, self.out, port, ('bind %s\n' % bind) if bind else '', extra, links))
         os.makedirs(self.inb, exist_ok=True)
         os.makedirs(self.out, exist_ok=True)
         write(self.conf, self.text())
@@ -190,6 +190,34 @@ try:
               wait(lambda: S2.logtext().count(b'(scheduled)') >= 2, 80))
         S1.stop()
         S2.stop()
+
+    # ---- IPv6: a mailer that listens on ::1 only is called at [::1] / ::1; the default listener takes IPv4 and IPv6 callers
+    try:
+        t6 = socket.socket(socket.AF_INET6); t6.bind(('::1', 0)); t6.close()
+        v6 = True
+    except OSError:
+        v6 = False
+        print('skip: no IPv6 on this system')
+    if v6:
+        B6 = Node('b6', '1:120/100', 24631, 'link 1:120/290\n  password secret\n  answer-only yes\n', bind='::1')
+        check('IPv6: a mailer with "bind ::1" starts and says where it listens', B6.start() and b'::1' in B6.logtext())
+        f6 = blob('six.bin', 5000)
+        want6 = open(f6, 'rb').read()
+        A6 = Node('a6', '1:120/290', 24632, 'link 1:120/100\n  host ::1\n  port 24631\n  password secret\n')
+        A6.queue('1:120/100', f6)
+        A6.start()
+        d6 = os.path.join(B6.inb, 'six.bin')
+        check('IPv6: "host ::1" is called, the file is delivered intact', wait(lambda: os.path.exists(d6) and open(d6, 'rb').read() == want6, 20))
+        check('IPv6: the session is logged with the address', b'::1' in B6.logtext() and b'finished' in A6.logtext())
+        B7 = Node('b7', '1:121/100', 24633, 'link 1:121/290\n  password secret\n  answer-only yes\nlink 1:121/291\n  password secret\n  answer-only yes\n', bind='')
+        check('IPv6: with no "bind" the mailer listens on IPv4 and IPv6', B7.start() and b'IPv4 and IPv6' in B7.logtext())
+        for n, host in (('a7', '::1'), ('a8', '127.0.0.1')):
+            f7 = blob('seven_%s.bin' % n, 3000)
+            A7 = Node(n, '1:121/29%d' % (0 if n == 'a7' else 1), 24634 + (n == 'a8'), 'link 1:121/100\n  host %s\n  port 24633\n  password secret\n' % host)
+            A7.queue('1:121/100', f7)
+            A7.start()
+            d7 = os.path.join(B7.inb, 'seven_%s.bin' % n)
+            check('IPv6: a caller from %s reaches the dual stack listener' % host, wait(lambda: os.path.exists(d7), 20))
 finally:
     for p in procs:
         if p.poll() is None:
