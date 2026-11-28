@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: GPL-3.0-or-later }
 unit BinkNode;
 
 {$mode objfpc}{$H+}

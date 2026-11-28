@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """The control socket of "mkbink run -S": hello, state frames, log lines, commands (POLL, HOLD, FREE, RESCAN, RELOAD, ABORT).
 Two mailers on localhost; A calls B.   usage: controltest.py [--big MB]"""
 import os, shutil, signal, socket, subprocess, sys, tempfile, time

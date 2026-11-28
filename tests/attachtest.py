@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Attach (FrontDoor) style outbound: netmail *.msg files plus attached files.
 
 The *.msg files are written here, and the packets mkbink builds are parsed here, both from FTS-0001 / FSC-0048

@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: GPL-3.0-or-later }
 Unit BinkNet;   {TCP over IPv4 and IPv6: connect, listen, addresses as text.  The same as MKNet.pas of the MK BBS (mk-fpc/src), which has the tests (tests/nettest.pas): keep them in step}
 
 {$MODE OBJFPC}

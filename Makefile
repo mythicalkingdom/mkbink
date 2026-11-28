@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Builds into ./build.  Needs Free Pascal (fpc) 3.x; no other libraries.
 #
 #   src/lib/   library units (bink*.pas)

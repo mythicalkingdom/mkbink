@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Implicit multiple batches (binkp 1.1 without OPT MB, the way binkd does it) against Python peers.
 
 binkd 1.1a has no OPT MB: after a batch in which anything but the two M_EOBs was exchanged, and when the remote says

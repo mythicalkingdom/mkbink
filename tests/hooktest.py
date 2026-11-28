@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Phase 5: files from a caller without a password go to inbound-unsecure, and on-inbound runs after a session that
 received files (arguments = the files, environment MKBINK_*), one at a time, killed after hook-timeout.
 usage: tests/hooktest.py"""

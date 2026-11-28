@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Phase 1 tests: the settings file (mkbink check) and the mailer (mkbink run) with two instances on localhost.
 usage: tests/runtest.py [--slow]      (--slow also waits for a "poll 1" call, about 70 s)"""
 import os, shutil, signal, socket, subprocess, sys, tempfile, time

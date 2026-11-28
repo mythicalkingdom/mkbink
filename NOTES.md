@@ -57,7 +57,7 @@ Later: tosser, netmail, file requests (config gives a "file request user" a leve
 * (fixed in phase 4) A remote that presents several addresses is accepted when at least one is known; the others are ignored.
 * A local `.bsy` lock held by an answering session makes a call to that link fail (counted as a failure, backoff).
 * Two callers receiving a file with identical name+size+time at once would share one `.part` file.
-* No IPv6, no binkd GZ/ND/NDA/MB/EXTCMD.
+* No binkd GZ/ND/NDA/MB/EXTCMD.
 * CRYPT has no setting in the links file (always on by default; `-E` on the command line disables it for poll/listen only).
 
 ## CRYPT (src/lib/binkcrypt.pas, commit 760c6fd)

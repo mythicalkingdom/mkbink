@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """File requests (FTS-0006).  Sending side: mkbink queue -R writes the .req of a system, and a .req in the outbound is sent to it
 (and removed when it has it).  Receiving side: a .req that arrives is answered by the command of on-freq (freq yes), the files it
 names are queued for the requester and sent; limits, unsecure callers, a failing command.
